@@ -1,0 +1,106 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  release:
+    types: [ created ]
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pre-commit
+        cd mcp-server && pip install -e .
+    
+    - name: Run pre-commit
+      run: |
+        pre-commit run --all-files
+
+  python-check:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Check Python syntax
+      run: |
+        python -m py_compile mcp-server/src/*.py
+        python -m py_compile scripts/*.py
+
+  docker-build:
+    runs-on: ubuntu-latest
+    needs: [pre-commit, python-check]
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Build Docker images
+      run: |
+        docker compose build
+    
+    - name: Test Docker stack
+      run: |
+        docker compose up -d qdrant
+        sleep 10
+        curl -f http://localhost:6333/ || exit 1
+        docker compose down
+
+
+  create-github-release:
+    needs: docker-build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release'
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Create release archive
+      run: |
+        mkdir -p /tmp/release
+        tar -czf /tmp/release/claude-self-reflect-${{ github.event.release.tag_name }}.tar.gz \
+          --exclude='node_modules' \
+          --exclude='venv' \
+          --exclude='.venv' \
+          --exclude='.git' \
+          --exclude='data' \
+          --exclude='qdrant_storage' \
+          --exclude='*.tar.gz' \
+          --exclude='__pycache__' \
+          --exclude='*.pyc' \
+          --exclude='logs' \
+          --exclude='.claude/agents' \
+          .
+        mv /tmp/release/claude-self-reflect-${{ github.event.release.tag_name }}.tar.gz .
+    
+    - name: Upload Release Asset
+      uses: softprops/action-gh-release@v2
+      with:
+        files: ./claude-self-reflect-${{ github.event.release.tag_name }}.tar.gz
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

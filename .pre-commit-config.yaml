@@ -1,0 +1,34 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.1.6
+    hooks:
+      - id: ruff
+        name: Ruff Linter (блокирует коммит при ошибках)
+        files: ^(mcp-server/src/|scripts/).*\.py$
+        # Не используем --fix чтобы принудительно показать ошибки
+        args: [--select=E,W,F]
+        fail_fast: true
+      
+      - id: ruff-format
+        name: Ruff Formatter (проверка форматирования)
+        files: ^(mcp-server/src/|scripts/).*\.py$
+        args: [--check]
+        fail_fast: true
+
+  - repo: local
+    hooks:
+      - id: python-syntax-check
+        name: Python syntax check (блокирует при синтаксических ошибках)
+        entry: python -m py_compile
+        language: system
+        files: ^(mcp-server/src/|scripts/).*\.py$
+        pass_filenames: true
+        fail_fast: true
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.4.0
+    hooks:
+      - id: trailing-whitespace
+        files: ^(mcp-server/src/|scripts/).*\.py$
+      - id: end-of-file-fixer
+        files: ^(mcp-server/src/|scripts/).*\.py$

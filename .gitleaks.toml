@@ -1,0 +1,58 @@
+# Gitleaks configuration for Claude Self-Reflect
+# This file configures secret scanning to reduce false positives
+
+[extend]
+# Extend the base configuration
+useDefault = true
+
+# Allow specific commits with revoked keys
+[[rules]]
+id = "openai-api-key"
+[rules.allowlist]
+commits = ["39b40d74", "d21f2d07", "0003ad17", "cd159bde"]
+
+# Allow test Voyage key in old Python script
+[[rules]]
+id = "generic-api-key"
+[rules.allowlist]
+commits = ["0003ad17", "4ff652ae"]
+paths = ['''scripts/import-live-conversation\.py''']
+
+# Allow false positive sourcegraph tokens in SARIF file (commit 0b77b64)
+[[rules]]
+id = "sourcegraph-access-token"
+[rules.allowlist]
+commits = ["0b77b64e29e5b8a899e723341947f7ebf44217fa"]
+
+[allowlist]
+# Global allowlist configuration
+description = "Allowlists for Claude Self-Reflect"
+
+# Allow test and archived directories
+paths = [
+    '''test-.*\.js$''',
+    '''test/.*''',
+    '''tests/.*''',
+    '''scripts/test/.*''',
+    '''archived/.*''',
+    '''claude-self-reflection/.*''',
+    '''README\.md''',
+    '''CLAUDE\.md''',
+    '''docs/.*\.md''',
+    '''installer/cli\.js''',
+    '''installer/setup-wizard\.js''',
+    '''.*\.example.*''',
+    '''.*\.sample.*''',
+    '''improved/.*''',
+    '''\.env'''
+]
+
+# Allow specific patterns that are false positives
+regexes = [
+    '''pa-1234567890''',
+    '''your-voyage-api-key''',
+    '''YOUR_VOYAGE_KEY''',
+    '''EXAMPLE_.*_KEY''',
+    '''no API calls''',
+    '''no API keys'''
+]
