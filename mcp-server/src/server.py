@@ -72,7 +72,8 @@ USE_NATIVE_DECAY = os.getenv('USE_NATIVE_DECAY', 'false').lower() == 'true'
 MCP_CLIENT_CWD = os.getenv('MCP_CLIENT_CWD', os.getcwd())
 
 # Embedding configuration
-EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL', 'sentence-transformers/all-MiniLM-L6-v2')
+EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL', 'intfloat/multilingual-e5-large')
+VECTOR_SIZE = int(os.getenv('VECTOR_SIZE', '1024'))
 
 # Smart model initialization with age check
 def is_model_fresh(model_name: str, cache_dir: str, max_age_days: int = 7) -> bool:
@@ -169,6 +170,7 @@ logger.info(f"USE_NATIVE_DECAY: {USE_NATIVE_DECAY}")
 logger.info(f"DECAY_WEIGHT: {DECAY_WEIGHT}")
 logger.info(f"DECAY_SCALE_DAYS: {DECAY_SCALE_DAYS}")
 logger.info(f"EMBEDDING_MODEL: {EMBEDDING_MODEL}")
+logger.info(f"VECTOR_SIZE: {VECTOR_SIZE}")
 logger.info(f"TRANSFORMERS_CACHE: {CACHE_DIR}")
 logger.info(f"HF_HOME: {HF_HOME or 'not set'}")
 logger.info(f"MODEL_CACHE_DAYS: {MODEL_CACHE_DAYS}")
@@ -277,9 +279,8 @@ async def generate_embedding(text: str) -> List[float]:
     return embeddings[0].tolist()
 
 def get_embedding_dimension() -> int:
-    """Get the dimension of embeddings (384 for all-MiniLM-L6-v2)."""
-    # all-MiniLM-L6-v2 produces 384-dimensional embeddings
-    return 384
+    """Get embedding dimension from environment (defaults to 1024 for e5-large)."""
+    return VECTOR_SIZE
 
 def get_collection_suffix() -> str:
     """Get the collection suffix for local embeddings."""

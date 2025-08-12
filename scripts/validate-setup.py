@@ -27,6 +27,8 @@ QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 CLAUDE_LOGS_DIR = os.path.expanduser("~/.claude/projects")
 MCP_CONFIG_PATH = os.path.expanduser("~/Library/Application Support/Claude/claude_desktop_config.json")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "intfloat/multilingual-e5-large")
+VECTOR_SIZE = int(os.getenv("VECTOR_SIZE", "1024"))
 
 # Color codes for output
 class Colors:
@@ -287,13 +289,17 @@ def test_api_connection() -> Dict[str, bool]:
     # Test local embeddings (FastEmbed)
     try:
         from fastembed import TextEmbedding
-        embedding_model = TextEmbedding("sentence-transformers/all-MiniLM-L6-v2")
+        embedding_model = TextEmbedding(EMBEDDING_MODEL)
         embeddings = list(embedding_model.embed(["test"]))
-        if embeddings and len(embeddings[0]) == 384:
-            print_status("FastEmbed (Local)", True, "384-dimensional embeddings working")
+        if embeddings:
+            dim = len(embeddings[0])
+            if dim == VECTOR_SIZE:
+                print_status("FastEmbed (Local)", True, f"{VECTOR_SIZE}-dimensional embeddings working for {EMBEDDING_MODEL}")
+            else:
+                print_status("FastEmbed (Local)", False, f"Unexpected embedding size: {dim}, expected {VECTOR_SIZE}")
             results["local_embeddings"] = True
         else:
-            print_status("FastEmbed (Local)", False, "Unexpected embedding format")
+            print_status("FastEmbed (Local)", False, "No embeddings returned")
             results["local_embeddings"] = False
     except Exception as e:
         print_status("FastEmbed (Local)", False, f"Failed: {e}")

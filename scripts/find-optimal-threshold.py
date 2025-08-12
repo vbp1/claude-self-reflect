@@ -7,6 +7,7 @@ import numpy as np
 from typing import List, Dict, Any, Tuple
 from dataclasses import dataclass
 from datetime import datetime
+import os
 
 from qdrant_client import AsyncQdrantClient
 from fastembed import TextEmbedding
@@ -42,7 +43,8 @@ class OptimalThresholdFinder:
     
     def __init__(self, qdrant_url: str = "http://localhost:6333"):
         self.client = AsyncQdrantClient(url=qdrant_url)
-        self.model = TextEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2")
+        embedding_model = os.getenv("EMBEDDING_MODEL", "intfloat/multilingual-e5-large")
+        self.model = TextEmbedding(model_name=embedding_model)
         self.results = []
         
     async def test_threshold(

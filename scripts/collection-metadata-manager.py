@@ -19,6 +19,8 @@ from qdrant_client.models import (
 # Configuration
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 METADATA_COLLECTION = "collection_metadata_local"
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "intfloat/multilingual-e5-large")
+VECTOR_SIZE = int(os.getenv("VECTOR_SIZE", "1024"))
 
 @dataclass
 class CollectionMetadata:
@@ -49,7 +51,7 @@ class CollectionMetadataManager:
             print(f"📦 Creating metadata collection: {METADATA_COLLECTION}")
             self.client.create_collection(
                 collection_name=METADATA_COLLECTION,
-                vectors_config=VectorParams(size=384, distance=Distance.COSINE)
+                vectors_config=VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE)
             )
     
     def _project_path_to_name(self, project_path: str) -> str:
@@ -69,7 +71,7 @@ class CollectionMetadataManager:
             
             metadata_point = PointStruct(
                 id=metadata_id,
-                vector=[0.1] * 384,  # Dummy vector for metadata storage
+                vector=[0.1] * VECTOR_SIZE,  # Dummy vector for metadata storage
                 payload=asdict(metadata)
             )
             

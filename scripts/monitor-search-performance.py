@@ -11,6 +11,7 @@ from dataclasses import dataclass, asdict
 from collections import deque
 import signal
 import sys
+import os
 
 from qdrant_client import AsyncQdrantClient
 from fastembed import TextEmbedding
@@ -82,7 +83,8 @@ class SearchPerformanceMonitor:
         window_size: int = 100
     ):
         self.client = AsyncQdrantClient(url=qdrant_url)
-        self.model = TextEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2")
+        embedding_model = os.getenv("EMBEDDING_MODEL", "intfloat/multilingual-e5-large")
+        self.model = TextEmbedding(model_name=embedding_model)
         self.metrics = deque(maxlen=window_size)
         self.all_metrics = []
         self.running = False

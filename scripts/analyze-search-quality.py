@@ -8,6 +8,7 @@ from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+import os
 
 from qdrant_client import AsyncQdrantClient
 from fastembed import TextEmbedding
@@ -48,7 +49,8 @@ class SearchQualityAnalyzer:
     
     def __init__(self, qdrant_url: str = "http://localhost:6333"):
         self.client = AsyncQdrantClient(url=qdrant_url)
-        self.model = TextEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2")
+        embedding_model = os.getenv("EMBEDDING_MODEL", "intfloat/multilingual-e5-large")
+        self.model = TextEmbedding(model_name=embedding_model)
         self.metrics_history = []
         
     async def analyze_query(
@@ -284,7 +286,7 @@ DEFAULT_TEST_CASES = [
     TestCase(
         query="semantic search with embeddings",
         expected_results=[
-            "semantic search", "embeddings", "FastEmbed", "all-MiniLM-L6-v2"
+            "semantic search", "embeddings", "FastEmbed", "multilingual-e5-large"
         ]
     ),
     TestCase(

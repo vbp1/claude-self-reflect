@@ -15,6 +15,12 @@ services:
     environment:
       - QDRANT__LOG_LEVEL=INFO
       - QDRANT__SERVICE__HTTP_PORT=6333
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:6333/readyz || wget -q -O- http://localhost:6333/readyz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
     restart: unless-stopped
     mem_limit: ${QDRANT_MEMORY:-1g}
     memswap_limit: ${QDRANT_MEMORY:-1g}
@@ -26,16 +32,21 @@ services:
       dockerfile: Dockerfile.watcher
     container_name: claude-reflection-watcher
     depends_on:
-      - qdrant
+      qdrant:
+        condition: service_healthy
     volumes:
       - ${CLAUDE_LOGS_PATH:-~/.claude/projects}:/logs:ro
       - ./scripts:/scripts:ro
       - watcher_state:/app/state
+      - huggingface_cache:/home/watcher/.cache/huggingface
     environment:
       - QDRANT_URL=http://qdrant:6333
       - LOGS_DIR=/logs
       - STATE_FILE=/app/state/watcher-state.json
-      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-intfloat/multilingual-e5-large}
+      - VECTOR_SIZE=${VECTOR_SIZE:-1024}
+      - TRANSFORMERS_CACHE=/home/watcher/.cache/huggingface
+      - HF_HOME=/home/watcher/.cache/huggingface
       # Main settings
       - IMPORT_INTERVAL=${IMPORT_INTERVAL:-${WATCH_INTERVAL:-60}}
       - BATCH_SIZE=${BATCH_SIZE:-100}
@@ -62,11 +73,14 @@ services:
       dockerfile: Dockerfile.mcp-server
     container_name: claude-reflection-mcp
     depends_on:
-      - qdrant
+      qdrant:
+        condition: service_healthy
     volumes:
       - huggingface_cache:/home/mcpuser/.cache/huggingface
     environment:
       - QDRANT_URL=http://qdrant:6333
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-intfloat/multilingual-e5-large}
+      - VECTOR_SIZE=${VECTOR_SIZE:-1024}
       - ENABLE_MEMORY_DECAY=${ENABLE_MEMORY_DECAY:-true}
       - DECAY_WEIGHT=${DECAY_WEIGHT:-0.3}
       - DECAY_SCALE_DAYS=${DECAY_SCALE_DAYS:-90}
