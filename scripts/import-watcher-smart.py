@@ -53,8 +53,8 @@ QDRANT_URL = os.getenv("QDRANT_URL", "http://qdrant:6333")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY") or None
 
 COLLECTION_NAME = os.getenv("COLLECTION_NAME", "claude_logs")
-VECTOR_SIZE = int(os.getenv("VECTOR_SIZE", "768"))  # под gte-multilingual-base
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "gte-multilingual-base")  # fastembed модель
+VECTOR_SIZE = int(os.getenv("VECTOR_SIZE", "1024"))  # default for multilingual-e5-large
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "intfloat/multilingual-e5-large")  # FastEmbed model
 EMBED_BATCH = int(os.getenv("EMBED_BATCH", "96"))
 NORMALIZE_L2 = os.getenv("NORMALIZE_L2", "true").lower() == "true"
 
