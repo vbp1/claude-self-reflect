@@ -154,18 +154,25 @@ def initialize_embedding_model(model_name: str, cache_dir: str):
         raise
 
 # Get cache directory from environment
-CACHE_DIR = os.getenv('HF_HOME', os.getenv('TRANSFORMERS_CACHE', '/home/mcpuser/.cache/huggingface'))
+CACHE_DIR = os.getenv('TRANSFORMERS_CACHE', '/home/mcpuser/.cache/huggingface')
+MODEL_CACHE_DAYS = int(os.getenv('MODEL_CACHE_DAYS', '7'))
+HF_HOME = os.getenv('HF_HOME', None)
 
 # Initialize local embedding model with smart caching
 local_embedding_model = initialize_embedding_model(EMBEDDING_MODEL, CACHE_DIR)
 
-# Debug environment loading
-logger.debug("Environment variables loaded:")
-logger.debug(f"ENABLE_MEMORY_DECAY: {ENABLE_MEMORY_DECAY}")
-logger.debug(f"USE_NATIVE_DECAY: {USE_NATIVE_DECAY}")
-logger.debug(f"DECAY_WEIGHT: {DECAY_WEIGHT}")
-logger.debug(f"DECAY_SCALE_DAYS: {DECAY_SCALE_DAYS}")
-logger.debug(f"EMBEDDING_MODEL: {EMBEDDING_MODEL}")
+# Log effective configuration
+logger.info("Effective configuration:")
+logger.info(f"QDRANT_URL: {QDRANT_URL}")
+logger.info(f"ENABLE_MEMORY_DECAY: {ENABLE_MEMORY_DECAY}")
+logger.info(f"USE_NATIVE_DECAY: {USE_NATIVE_DECAY}")
+logger.info(f"DECAY_WEIGHT: {DECAY_WEIGHT}")
+logger.info(f"DECAY_SCALE_DAYS: {DECAY_SCALE_DAYS}")
+logger.info(f"EMBEDDING_MODEL: {EMBEDDING_MODEL}")
+logger.info(f"TRANSFORMERS_CACHE: {CACHE_DIR}")
+logger.info(f"HF_HOME: {HF_HOME or 'not set'}")
+logger.info(f"MODEL_CACHE_DAYS: {MODEL_CACHE_DAYS}")
+logger.info(f"MCP_CLIENT_CWD: {MCP_CLIENT_CWD}")
 logger.debug(f"env_path: {env_path}")
 
 
@@ -277,48 +284,7 @@ def get_embedding_dimension() -> int:
 def get_collection_suffix() -> str:
     """Get the collection suffix for local embeddings."""
     return "_local"
-
-def find_git_root(start_path: Optional[str] = None) -> Optional[str]:
-    """Find git repository root using git rev-parse command."""
-    if start_path is None:
-        start_path = os.getcwd()
-    
-    try:
-        result = subprocess.run(
-            ['git', 'rev-parse', '--show-toplevel'],
-            cwd=start_path,
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=5  # Safety timeout
-        )
-        
-        git_root = result.stdout.strip()
-        if git_root and Path(git_root).exists():
-            return git_root  # Return full path, not just the name
-            
-    except subprocess.CalledProcessError as e:
-        # Not a git repository or other git error
-        if e.returncode == 128:  # Standard "not a git repository" code
-            return None
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        # Git not installed or timeout
-        return None
-    
-    return None
-
-def determine_project_name(cwd: Optional[str] = None) -> str:
-    """Determine project name with git root priority."""
-    if cwd is None:
-        cwd = os.getcwd()
-    
-    # Priority 1: Git root detection
-    git_project = find_git_root(cwd)
-    if git_project:
-        return git_project
-    
-    raise ValueError(f"Failed to determine project name for working directory: {cwd}")
-    
+ 
 # Register tools
 @mcp.tool()
 async def reflect_on_past(
@@ -355,10 +321,7 @@ async def reflect_on_past(
     
     # Determine project scope
     if project is None:
-        target_project = find_git_root(MCP_CLIENT_CWD)
-        if target_project is None:
-            # fallback to MCP_CLIENT_CWD
-            target_project = MCP_CLIENT_CWD
+        target_project = MCP_CLIENT_CWD
     else:
         target_project = project
 
@@ -695,10 +658,7 @@ async def store_reflection(
     try:
         # Determine project scope
         if project is None:
-            target_project = find_git_root(MCP_CLIENT_CWD)
-            if target_project is None:
-                # fallback to MCP_CLIENT_CWD
-                target_project = MCP_CLIENT_CWD
+            target_project = MCP_CLIENT_CWD
         else:
             target_project = project
         

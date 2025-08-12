@@ -1,6 +1,61 @@
 #!/bin/bash
 # Docker wrapper for MCP server - ensures container is running and executes MCP via stdio
 
+# Fail fast on errors and unset vars
+set -euo pipefail
+
+# Collect environment variables passed via -e/--env and forward them to docker exec
+# Supports: `-e KEY=VALUE`, `-e KEY`, `--env KEY=VALUE`, `--env=KEY=VALUE`
+ENV_LIST=()
+
+while [[ ${#} -gt 0 ]]; do
+  case "${1}" in
+    -e|--env)
+      # Next token should be VAR or VAR=VAL
+      if [[ ${#} -lt 2 ]]; then
+        echo "Missing value for ${1}" >&2
+        exit 2
+      fi
+      ENV_LIST+=("${2}")
+      shift 2
+      ;;
+    -e*)
+      # Handle `-eVAR=VAL` form
+      ENV_LIST+=("${1#-e}")
+      shift 1
+      ;;
+    --env=*)
+      # Handle `--env=VAR=VAL` form
+      ENV_LIST+=("${1#--env=}")
+      shift 1
+      ;;
+    --)
+      shift 1
+      break
+      ;;
+    *)
+      # Ignore unknown args (the Claude CLI may pass only -e flags)
+      shift 1
+      ;;
+  esac
+done
+
+# Ensure MCP_CLIENT_CWD is always available inside the container for project scoping logic
+HAS_MCP_CWD=false
+for kv in "${ENV_LIST[@]:-}"; do
+  if [[ "$kv" == MCP_CLIENT_CWD* || "$kv" == "MCP_CLIENT_CWD" ]]; then
+    HAS_MCP_CWD=true
+    break
+  fi
+done
+if [[ "$HAS_MCP_CWD" == false ]]; then
+  if root=$(git -C "$(pwd)" rev-parse --show-toplevel 2>/dev/null); then
+    ENV_LIST+=("MCP_CLIENT_CWD=$root")
+  else
+    ENV_LIST+=("MCP_CLIENT_CWD=$(pwd)")
+  fi
+fi
+
 # Get the directory of this script
 SCRIPT_DIR="$(dirname "${BASH_SOURCE[0]}")"
 
@@ -22,4 +77,16 @@ for i in {1..30}; do
 done
 
 # Execute MCP server in the running container via stdio
-exec docker exec -i claude-reflection-mcp python -m src
+EXEC_CMD=(docker exec -i)
+
+# Forward all collected env vars into container
+for kv in "${ENV_LIST[@]:-}"; do
+  EXEC_CMD+=("-e" "$kv")
+done
+
+# Always ensure unbuffered output for timely logs
+EXEC_CMD+=("-e" "PYTHONUNBUFFERED=1")
+
+EXEC_CMD+=(claude-reflection-mcp python -m src)
+
+exec "${EXEC_CMD[@]}"

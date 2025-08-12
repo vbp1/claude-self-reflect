@@ -27,6 +27,8 @@ COPY scripts/import-watcher-smart.py /scripts/
 
 RUN chmod +x /scripts/*.py
 
+RUN mkdir -p /app/state && chown -R watcher:watcher /app/state
+
 # Set working directory
 WORKDIR /app
 

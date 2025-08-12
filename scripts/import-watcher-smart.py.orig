@@ -1,0 +1,922 @@
+#!/usr/bin/env python3
+"""
+Smart incremental importer for Claude conversations with intelligent caching and change detection.
+"""
+
+import os
+import sys
+import json
+import time
+import hashlib
+import logging
+import threading
+from pathlib import Path
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Optional, Set, Tuple, Any
+from dataclasses import dataclass, field, asdict
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import backoff
+from qdrant_client import QdrantClient
+from qdrant_client.models import (
+    PointStruct, VectorParams, Distance,
+    SparseVector, SparseVectorParams, SparseIndexParams
+)
+from fastembed import TextEmbedding
+
+# Configure logging
+logging.basicConfig(
+    level=os.getenv('LOG_LEVEL', 'INFO'),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Environment variables
+QDRANT_URL = os.getenv('QDRANT_URL', 'http://localhost:6333')
+LOGS_DIR = os.getenv('LOGS_DIR', os.path.expanduser('~/.claude/projects'))
+STATE_FILE = os.getenv('STATE_FILE', '/tmp/watcher-state.json')
+
+# Intervals
+IMPORT_INTERVAL = int(os.getenv('IMPORT_INTERVAL', '60'))
+FORCE_FULL_CHECK_INTERVAL = int(os.getenv('FORCE_FULL_CHECK_INTERVAL', '3600'))
+QUICK_CHECK_ONLY = os.getenv('QUICK_CHECK_ONLY', 'false').lower() == 'true'
+
+# Performance settings
+BATCH_SIZE = int(os.getenv('BATCH_SIZE', '100'))
+CHUNK_SIZE = int(os.getenv('CHUNK_SIZE', '10'))
+MAX_PARALLEL_HASHES = int(os.getenv('MAX_PARALLEL_HASHES', '5'))
+
+# Embedding model settings
+# Keep this in sync with EmbeddingService
+EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL', 'sentence-transformers/all-MiniLM-L6-v2')
+
+# Logging settings
+LOG_STATS_EVERY = int(os.getenv('LOG_STATS_EVERY', '10'))
+VERBOSE_CHECKS = os.getenv('VERBOSE_CHECKS', 'false').lower() == 'true'
+
+
+@dataclass
+class FileInfo:
+    """Information about a file for tracking changes."""
+    path: str
+    mtime: float
+    size: int
+    hash: Optional[str] = None
+    last_processed: Optional[str] = None
+    chunks_count: int = 0
+    lines_processed: int = 0
+
+
+@dataclass
+class CollectionInfo:
+    """Information about a Qdrant collection."""
+    name: str
+    created: str
+    points_count: int
+    last_updated: str
+    project_name: str = ""
+
+
+class WatcherState:
+    """Manages the persistent state of the watcher."""
+    
+    def __init__(self, state_file: str):
+        self.state_file = Path(state_file)
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        self.state = self._load_state()
+        self.last_save = time.time()
+        self._save_lock = threading.Lock()
+        
+    def _load_state(self) -> Dict:
+        """Load state from file or create new."""
+        if self.state_file.exists():
+            try:
+                with open(self.state_file, 'r') as f:
+                    state = json.load(f)
+                logger.info(f"Loaded state with {len(state.get('files', {}))} files")
+                return state
+            except Exception as e:
+                logger.error(f"Failed to load state: {e}")
+                
+        return {
+            'version': '1.0',
+            'last_scan': None,
+            'last_full_check': None,
+            'files': {},
+            'collections': {}
+        }
+    
+    def save(self, force: bool = False):
+        """Save state to file."""
+        # Save every 30 seconds or when forced
+        with self._save_lock:
+            if not force and (time.time() - self.last_save) < 30:
+                return
+            
+            try:
+                # Write to temp file first for atomicity
+                temp_file = self.state_file.with_suffix('.tmp')
+                with open(temp_file, 'w') as f:
+                    json.dump(self.state, f, indent=2, default=str)
+                
+                # Atomic rename
+                temp_file.replace(self.state_file)
+                self.last_save = time.time()
+                logger.debug("State saved successfully")
+                
+            except Exception as e:
+                logger.error(f"Failed to save state: {e}")
+    
+    def get_file_info(self, path: str) -> Optional[FileInfo]:
+        """Get FileInfo for a path from state."""
+        if path in self.state['files']:
+            data = self.state['files'][path]
+            return FileInfo(**data) if isinstance(data, dict) else None
+        return None
+    
+    def update_file(self, file_info: FileInfo):
+        """Update file information in state."""
+        self.state['files'][file_info.path] = {
+            'path': file_info.path,
+            'mtime': file_info.mtime,
+            'size': file_info.size,
+            'hash': file_info.hash,
+            'last_processed': file_info.last_processed or datetime.now(timezone.utc).isoformat(),
+            'chunks_count': file_info.chunks_count,
+            'lines_processed': file_info.lines_processed
+        }
+    
+    def remove_file(self, path: str):
+        """Remove file from state."""
+        if path in self.state['files']:
+            del self.state['files'][path]
+    
+    def update_collection(self, collection: CollectionInfo):
+        """Update collection information in state."""
+        self.state['collections'][collection.name] = {
+            'name': collection.name,
+            'created': collection.created,
+            'points_count': collection.points_count,
+            'last_updated': collection.last_updated,
+            'project_name': collection.project_name
+        }
+    
+    def needs_full_check(self) -> bool:
+        """Check if full scan is needed."""
+        if QUICK_CHECK_ONLY:
+            return False
+            
+        if not self.state.get('last_full_check'):
+            return True
+            
+        # Parse timestamp, handling both naive and aware datetimes
+        last_check_str = self.state['last_full_check']
+        if last_check_str.endswith('Z'):
+            last_check_str = last_check_str[:-1] + '+00:00'
+        last_check = datetime.fromisoformat(last_check_str)
+        # Make timezone-aware if naive
+        if last_check.tzinfo is None:
+            last_check = last_check.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - last_check).total_seconds() > FORCE_FULL_CHECK_INTERVAL
+    
+    def mark_full_check(self):
+        """Mark that full check was performed."""
+        self.state['last_full_check'] = datetime.now(timezone.utc).isoformat()
+
+
+class FileProcessor:
+    """Processes JSONL files and extracts messages."""
+    
+    def __init__(self):
+        self.stats = defaultdict(int)
+        
+    def scan_files(self, base_dir: str) -> List[str]:
+        """Scan directory for JSONL files."""
+        base_path = Path(base_dir)
+        if not base_path.exists():
+            logger.warning(f"Directory does not exist: {base_dir}")
+            return []
+        
+        files = []
+        pattern = "**/*.jsonl"
+        
+        for file_path in base_path.glob(pattern):
+            # Skip hidden files and directories
+            if any(part.startswith('.') for part in file_path.parts):
+                continue
+            files.append(str(file_path))
+        
+        logger.info(f"Found {len(files)} JSONL files")
+        return sorted(files)
+    
+    def get_file_info(self, path: str) -> FileInfo:
+        """Get FileInfo for a file."""
+        stat = os.stat(path)
+        return FileInfo(
+            path=path,
+            mtime=stat.st_mtime,
+            size=stat.st_size
+        )
+    
+    def calculate_file_hash(self, path: str, last_n_lines: Optional[int] = None) -> str:
+        """Calculate SHA256 hash of file or last N lines."""
+        hasher = hashlib.sha256()
+        
+        try:
+            with open(path, 'rb') as f:
+                if last_n_lines:
+                    # Read last N lines for active session detection
+                    lines = f.readlines()
+                    content = b''.join(lines[-last_n_lines:])
+                    hasher.update(content)
+                else:
+                    # Hash entire file in chunks
+                    while chunk := f.read(8192):
+                        hasher.update(chunk)
+                        
+            return hasher.hexdigest()
+            
+        except Exception as e:
+            logger.error(f"Failed to hash {path}: {e}")
+            return ""
+    
+    def parse_jsonl_file(self, path: str, start_line: int = 0) -> List[Dict]:
+        """Parse JSONL file and extract messages."""
+        messages = []
+        
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                # Skip to start line if specified
+                for _ in range(start_line):
+                    f.readline()
+                
+                line_num = start_line
+                for line in f:
+                    line_num += 1
+                    
+                    if not line.strip():
+                        continue
+                    
+                    try:
+                        data = json.loads(line)
+                        
+                        # Filter out meta messages and system commands
+                        if data.get('isMeta'):
+                            continue
+                        
+                        if 'message' in data:
+                            msg = data['message']
+                            content = msg.get('content', '')
+                            
+                            # Skip system commands
+                            if isinstance(content, str) and content.startswith('/'):
+                                continue
+                            
+                            # Add line number for tracking
+                            data['_line_number'] = line_num
+                            messages.append(data)
+                            
+                    except json.JSONDecodeError as e:
+                        logger.debug(f"Skipping invalid JSON at line {line_num}: {e}")
+                        
+        except Exception as e:
+            logger.error(f"Failed to parse {path}: {e}")
+            
+        return messages
+    
+    def extract_project_name(self, path: str) -> str:
+        """Extract project identifier from file path.
+
+        For watcher, use the parent directory name without transformations.
+        This keeps it consistent with SmartWatcher.process_single_file.
+        """
+        return Path(path).parent.name
+
+
+class ChunkGenerator:
+    """Generates chunks from messages for vectorization."""
+    
+    def __init__(self, chunk_size: int = CHUNK_SIZE):
+        self.chunk_size = chunk_size
+        
+    def create_chunks(self, messages: List[Dict], file_path: str) -> List[Dict]:
+        """Create chunks from messages."""
+        if not messages:
+            return []
+        
+        chunks = []
+        current_chunk = []
+        chunk_start_time = None
+        last_type = None
+        
+        for msg in messages:
+            msg_type = msg.get('type', 'unknown')
+            timestamp = msg.get('timestamp')
+            
+            # Determine if we should create a new chunk
+            should_split = False
+            
+            # Check chunk size
+            if len(current_chunk) >= self.chunk_size:
+                should_split = True
+            
+            # Check type change (user -> assistant transition)
+            elif last_type == 'user' and msg_type == 'assistant':
+                should_split = True
+            
+            # Check time gap (> 30 minutes)
+            elif chunk_start_time and timestamp:
+                try:
+                    # Parse timestamps handling Z suffix
+                    current_str = timestamp.replace('Z', '+00:00') if timestamp.endswith('Z') else timestamp
+                    start_str = chunk_start_time.replace('Z', '+00:00') if chunk_start_time.endswith('Z') else chunk_start_time
+                    
+                    current_time = datetime.fromisoformat(current_str)
+                    start_time = datetime.fromisoformat(start_str)
+                    
+                    # Make timezone-aware if naive
+                    if current_time.tzinfo is None:
+                        current_time = current_time.replace(tzinfo=timezone.utc)
+                    if start_time.tzinfo is None:
+                        start_time = start_time.replace(tzinfo=timezone.utc)
+                    
+                    # Use total_seconds() for accurate time difference
+                    if (current_time - start_time).total_seconds() > 1800:  # 30 minutes
+                        should_split = True
+                except Exception as e:
+                    logger.debug(f"Could not parse timestamps for chunking: {e}")
+                    pass
+            
+            # Create chunk if needed
+            if should_split and current_chunk:
+                chunks.append(self._finalize_chunk(current_chunk, file_path))
+                current_chunk = []
+                chunk_start_time = None
+            
+            # Add message to current chunk
+            current_chunk.append(msg)
+            if not chunk_start_time:
+                chunk_start_time = timestamp
+            last_type = msg_type
+        
+        # Add remaining messages
+        if current_chunk:
+            chunks.append(self._finalize_chunk(current_chunk, file_path))
+        
+        return chunks
+    
+    def _finalize_chunk(self, messages: List[Dict], file_path: str) -> Dict:
+        """Finalize a chunk with metadata."""
+        # Extract text content
+        texts = []
+        for msg in messages:
+            if 'message' in msg:
+                content = msg['message'].get('content', '')
+                if isinstance(content, str):
+                    texts.append(content)
+                elif isinstance(content, list):
+                    # Handle structured content
+                    for item in content:
+                        if isinstance(item, dict) and 'text' in item:
+                            texts.append(item['text'])
+        
+        combined_text = " ".join(texts)
+        
+        # Extract metadata first
+        first_msg = messages[0]
+        project_name = self._extract_project_from_path(file_path)
+        
+        # Determine the starting role
+        first_role = first_msg.get('type', 'assistant')
+        if first_role not in ['user', 'assistant']:
+            # Map message types to roles
+            first_role = 'user' if first_role == 'human' else 'assistant'
+        
+        # Normalize timestamp (handle Z suffix)
+        raw_timestamp = first_msg.get('timestamp', datetime.now(timezone.utc).isoformat())
+        if raw_timestamp.endswith('Z'):
+            # Convert Z to +00:00 for proper ISO format
+            normalized_timestamp = raw_timestamp[:-1] + '+00:00'
+        else:
+            normalized_timestamp = raw_timestamp
+            
+        # Generate deterministic chunk ID based on content and metadata
+        # This ensures same chunk gets same ID on re-import
+        chunk_data = f"{project_name}:{first_msg.get('sessionId', '')}:{raw_timestamp}:{combined_text[:100]}"
+        chunk_hash = hashlib.sha256(chunk_data.encode()).hexdigest()[:16]
+        chunk_id = f"chunk_{chunk_hash}"
+        
+        return {
+            'chunk_id': chunk_id,
+            'project_name': project_name,
+            'session_id': first_msg.get('sessionId', 'unknown'),
+            'timestamp': normalized_timestamp,
+            'messages_count': len(messages),
+            'combined_text': combined_text,
+            'tokens_estimate': len(combined_text.split()),  # Rough estimate
+            'git_branch': first_msg.get('gitBranch', ''),
+            'working_directory': first_msg.get('cwd', ''),
+            'start_role': first_role,  # Add start_role for MCP server compatibility
+            'messages': messages  # Keep original messages for reference
+        }
+    
+    def _extract_project_from_path(self, path: str) -> str:
+        """Extract project identifier from file path.
+
+        For watcher, use the parent directory name without transformations.
+        Keep consistent with FileProcessor.extract_project_name and
+        SmartWatcher.process_single_file.
+        """
+        return Path(path).parent.name
+
+
+class EmbeddingService:
+    """Service for generating embeddings using FastEmbed."""
+    
+    def __init__(self):
+        logger.info("Initializing FastEmbed model...")
+        self.model = TextEmbedding(
+            model_name=EMBEDDING_MODEL,
+            cache_dir="/tmp/fastembed_cache"
+        )
+        self.vector_size = 384
+        self.max_tokens = 512
+        
+    def generate_embedding(self, text: str) -> List[float]:
+        """Generate embedding for text."""
+        # Truncate text to max tokens
+        truncated = self._truncate_to_tokens(text, self.max_tokens)
+        
+        # Generate embedding
+        embeddings = list(self.model.embed([truncated]))
+        return embeddings[0].tolist() if embeddings else []
+    
+    def generate_batch_embeddings(self, texts: List[str]) -> List[List[float]]:
+        """Generate embeddings for multiple texts."""
+        # Truncate all texts
+        truncated = [self._truncate_to_tokens(t, self.max_tokens) for t in texts]
+        
+        # Generate embeddings
+        embeddings = list(self.model.embed(truncated))
+        return [e.tolist() for e in embeddings]
+    
+    def _truncate_to_tokens(self, text: str, max_tokens: int) -> str:
+        """Truncate text to approximately max tokens."""
+        # Simple word-based truncation (1 word ≈ 1.3 tokens)
+        words = text.split()
+        max_words = int(max_tokens / 1.3)
+        
+        if len(words) <= max_words:
+            return text
+            
+        return " ".join(words[:max_words])
+
+
+class QdrantService:
+    """Service for interacting with Qdrant vector database."""
+    
+    METADATA_COLLECTION = "collection_metadata_local"
+    
+    def __init__(self, url: str = QDRANT_URL):
+        self.client = QdrantClient(url=url)
+        self.vector_size = 384
+        self.ensure_metadata_collection()
+    
+    def ensure_metadata_collection(self):
+        """Ensure metadata collection exists with sparse vectors."""
+        try:
+            collections = self.client.get_collections().collections
+            exists = any(c.name == self.METADATA_COLLECTION for c in collections)
+            
+            if not exists:
+                # Create collection with sparse vectors for metadata
+                self.client.create_collection(
+                    collection_name=self.METADATA_COLLECTION,
+                    vectors_config={},  # No dense vectors needed
+                    sparse_vectors_config={
+                        "metadata": SparseVectorParams(
+                            index=SparseIndexParams(
+                                on_disk=False  # Keep in memory for fast access
+                            )
+                        )
+                    }
+                )
+                logger.info(f"Created metadata collection with sparse vectors: {self.METADATA_COLLECTION}")
+        except Exception as e:
+            logger.error(f"Failed to ensure metadata collection: {e}")
+    
+    def update_collection_metadata(self, collection_name: str, project_path: str):
+        """Update metadata for a collection with sparse vectors."""
+        try:
+            # Use project_path as provided (parent folder name of imported file)
+            
+            # Create metadata payload with only required fields
+            metadata = {
+                "collection_name": collection_name,
+                "project_path": project_path,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "embedding_model": EMBEDDING_MODEL,  # Store the model used for embeddings
+                "tags": ["metadata"]  # Tag for metadata entries
+            }
+            
+            # Create sparse vector (single value for metadata entries)
+            # Using index 0 with value 1.0 to mark as metadata
+            sparse_vector = SparseVector(
+                indices=[0],
+                values=[1.0]
+            )
+            
+            # Generate integer ID for metadata point
+            # Use hash of collection name to create deterministic integer ID
+            metadata_id = int(hashlib.md5(collection_name.encode()).hexdigest()[:16], 16) & 0x7FFFFFFFFFFFFFFF
+            
+            point = PointStruct(
+                id=metadata_id,
+                vector={"metadata": sparse_vector},  # Named sparse vector
+                payload=metadata
+            )
+            
+            self.client.upsert(
+                collection_name=self.METADATA_COLLECTION,
+                points=[point]
+            )
+            logger.debug(f"Updated metadata for collection {collection_name} with sparse vector")
+            
+        except Exception as e:
+            logger.error(f"Failed to update collection metadata: {e}")
+        
+    def ensure_collection(self, collection_name: str) -> bool:
+        """Ensure collection exists with proper configuration."""
+        try:
+            # Check if collection exists
+            collections = self.client.get_collections().collections
+            exists = any(c.name == collection_name for c in collections)
+            
+            if not exists:
+                # Create collection
+                self.client.create_collection(
+                    collection_name=collection_name,
+                    vectors_config=VectorParams(
+                        size=self.vector_size,
+                        distance=Distance.COSINE
+                    )
+                )
+                logger.info(f"Created collection: {collection_name}")
+                return True
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to ensure collection {collection_name}: {e}")
+            return False
+    
+    @backoff.on_exception(
+        backoff.expo,
+        (ConnectionError, TimeoutError),
+        max_tries=3,
+        max_time=60
+    )
+    def upsert_points(self, collection_name: str, points: List[PointStruct]) -> bool:
+        """Upsert points to collection with retry logic."""
+        try:
+            self.client.upsert(
+                collection_name=collection_name,
+                points=points
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to upsert points: {e}")
+            return False
+    
+    def get_collection_info(self, collection_name: str) -> Optional[Dict]:
+        """Get information about a collection."""
+        try:
+            info = self.client.get_collection(collection_name)
+            return {
+                'name': collection_name,
+                'points_count': info.points_count,
+                'vectors_count': info.vectors_count,
+                'indexed_vectors_count': info.indexed_vectors_count
+            }
+        except Exception as e:
+            logger.debug(f"Failed to get collection info: {e}")
+            return None
+    
+    def delete_points(self, collection_name: str, point_ids: List[str]) -> bool:
+        """Delete points from collection."""
+        try:
+            self.client.delete(
+                collection_name=collection_name,
+                points_selector=point_ids
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete points: {e}")
+            return False
+
+
+class SmartWatcher:
+    """Main watcher class that orchestrates the import process."""
+    
+    def __init__(self):
+        self.state = WatcherState(STATE_FILE)
+        self.processor = FileProcessor()
+        self.chunk_generator = ChunkGenerator()
+        self.embedding_service = EmbeddingService()
+        self.qdrant_service = QdrantService()
+        
+        # Caches
+        self.active_sessions_cache = {}
+        self.file_hash_cache = {}
+        
+        # Statistics
+        self.stats = defaultdict(int)
+        self.start_time = time.time()
+        
+    def run(self):
+        """Main run loop."""
+        logger.info("Starting Smart Watcher...")
+        logger.info(f"Configuration:")
+        logger.info(f"  LOGS_DIR: {LOGS_DIR}")
+        logger.info(f"  QDRANT_URL: {QDRANT_URL}")
+        logger.info(f"  IMPORT_INTERVAL: {IMPORT_INTERVAL}s")
+        logger.info(f"  CHUNK_SIZE: {CHUNK_SIZE} messages")
+        logger.info(f"  BATCH_SIZE: {BATCH_SIZE}")
+        
+        iteration = 0
+        while True:
+            try:
+                iteration += 1
+                logger.info(f"Starting iteration {iteration}")
+                
+                # Perform incremental import
+                self.perform_import()
+                
+                # Save state periodically
+                self.state.save()
+                
+                # Log statistics
+                if iteration % LOG_STATS_EVERY == 0:
+                    self.log_statistics()
+                
+                # Sleep before next iteration
+                logger.info(f"Sleeping for {IMPORT_INTERVAL} seconds...")
+                time.sleep(IMPORT_INTERVAL)
+                
+            except KeyboardInterrupt:
+                logger.info("Shutting down...")
+                self.state.save(force=True)
+                break
+                
+            except Exception as e:
+                logger.error(f"Error in main loop: {e}", exc_info=True)
+                time.sleep(IMPORT_INTERVAL)
+    
+    def perform_import(self):
+        """Perform incremental import of changed files."""
+        # Scan for files
+        scan_start = time.monotonic()
+        current_files = set(self.processor.scan_files(LOGS_DIR))
+        known_files = set(self.state.state['files'].keys())
+        
+        # Find deleted files
+        deleted_files = known_files - current_files
+        
+        # Handle deleted files
+        for path in deleted_files:
+            logger.info(f"File deleted: {path}")
+            self.state.remove_file(path)
+            self.stats['files_deleted'] += 1
+        
+        # Check for changed files
+        changed_files = []
+        perform_full_check = self.state.needs_full_check()
+        
+        for path in current_files:
+            file_info = self.processor.get_file_info(path)
+            old_info = self.state.get_file_info(path)
+            
+            if old_info is None:
+                # New file
+                changed_files.append((path, file_info, True))
+
+            elif perform_full_check:
+                # Full check: always use hash comparison
+                file_info.hash = self.processor.calculate_file_hash(path)
+                
+                # Compare with old hash
+                if not old_info.hash or file_info.hash != old_info.hash:
+                    changed_files.append((path, file_info, False))
+                    if old_info.hash and (file_info.mtime == old_info.mtime and file_info.size == old_info.size):
+                        logger.warning(f"File {path} changed without mtime/size update!")
+            else:
+                # Quick check: only mtime and size
+                if file_info.mtime != old_info.mtime or file_info.size != old_info.size:
+                    changed_files.append((path, file_info, False))
+        
+        # Mark full check if performed
+        if perform_full_check:
+            self.state.mark_full_check()
+
+        scan_duration = time.monotonic() - scan_start
+        logger.info(f"Scan completed in {scan_duration:.3f} s (found {len(current_files)} files)")
+       
+        # Log counts based on the actual processing list to avoid mismatch
+        new_count = sum(1 for _, _, is_new in changed_files)
+        changed_only_count = len(changed_files) - new_count
+        deleted_count = len(deleted_files)
+        logger.info(f"Files to process: {new_count} new, {changed_only_count} changed, {deleted_count} deleted")
+        
+        # Process files in parallel
+        import_start = time.monotonic()
+        if changed_files:
+            self.process_files_parallel(changed_files)
+        import_duration = time.monotonic() - import_start
+        logger.info(f"Import completed in {import_duration:.3f} s (processed {len(changed_files)} files)")
+    
+    def process_files_parallel(self, files: List[Tuple[str, FileInfo, bool]]):
+        """Process multiple files in parallel."""
+        with ThreadPoolExecutor(max_workers=MAX_PARALLEL_HASHES) as executor:
+            futures = []
+            
+            for path, file_info, is_new in files:
+                future = executor.submit(self.process_single_file, path, file_info, is_new)
+                futures.append(future)
+            
+            # Collect results
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    if result:
+                        self.stats['files_processed'] += 1
+                        # Save state after each successfully processed file
+                        # Throttled by WatcherState.save() (30s)
+                        self.state.save()
+                except Exception as e:
+                    logger.error(f"Failed to process file: {e}")
+                    self.stats['files_failed'] += 1
+    
+    def process_single_file(self, path: str, file_info: FileInfo, is_new: bool) -> bool:
+        """Process a single file."""
+        try:
+            logger.info(f"Processing {'new' if is_new else 'changed'} file: {path}")
+            
+            # Parse messages
+            start_line = 0 if is_new else self.state.get_file_info(path).lines_processed
+            messages = self.processor.parse_jsonl_file(path, start_line)
+            
+            if not messages:
+                logger.debug(f"No new messages in {path}")
+                return False
+            
+            # Create chunks
+            chunks = self.chunk_generator.create_chunks(messages, path)
+            logger.info(f"Created {len(chunks)} chunks from {len(messages)} messages")
+            
+            # Process chunks in batches
+            project_name = self.processor.extract_project_name(path)
+            collection_name = self._get_collection_name(project_name)
+            
+            # Ensure collection exists
+            if not self.qdrant_service.ensure_collection(collection_name):
+                return False
+            
+            # Update chunks with watcher path
+            for chunk in chunks:
+                chunk['project_path'] = project_name
+            
+            # Update metadata for collection
+            self.qdrant_service.update_collection_metadata(collection_name, project_name)
+            
+            # Process in batches
+            for i in range(0, len(chunks), BATCH_SIZE):
+                batch = chunks[i:i+BATCH_SIZE]
+                self.process_chunk_batch(batch, collection_name)
+            
+            # Update file info
+            file_info.chunks_count += len(chunks)
+            file_info.lines_processed = start_line + len(messages)
+            file_info.last_processed = datetime.now(timezone.utc).isoformat()
+            
+            # Calculate hash if not done
+            if not file_info.hash:
+                file_info.hash = self.processor.calculate_file_hash(path)
+            
+            # Update state
+            self.state.update_file(file_info)
+            
+            # Update collection info
+            self.update_collection_info(collection_name, project_name)
+            
+            self.stats['chunks_created'] += len(chunks)
+            self.stats['messages_processed'] += len(messages)
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to process {path}: {e}", exc_info=True)
+            return False
+    
+    def process_chunk_batch(self, chunks: List[Dict], collection_name: str):
+        """Process a batch of chunks."""
+        # Generate embeddings for all chunks
+        texts = [chunk['combined_text'] for chunk in chunks]
+        embeddings = self.embedding_service.generate_batch_embeddings(texts)
+        
+        # Create points
+        points = []
+        for chunk, embedding in zip(chunks, embeddings):
+            point_id = self._generate_point_id(chunk)
+            
+            point = PointStruct(
+                id=point_id,
+                vector=embedding,
+                payload={
+                    'text': chunk['combined_text'][:5000],  # MCP server expects 'text', not 'content'!
+                    'timestamp': chunk['timestamp'],
+                    'conversation_id': chunk['session_id'],  # MCP server expects 'conversation_id'
+                    'type': 'conversation',  # Mark as conversation chunk (vs 'reflection')
+                    'session_id': chunk['session_id'],  # Keep for backward compatibility
+                    'chunk_id': chunk['chunk_id'],
+                    'messages_count': chunk['messages_count'],
+                    'project': chunk.get('project_path', chunk['project_name']),  # Use watcher format path
+                    'role': chunk.get('start_role', 'assistant'),  # Add role for search compatibility
+                    'start_role': chunk.get('start_role', 'assistant'),  # MCP server uses this for filtering
+                    'git_branch': chunk.get('git_branch', ''),
+                    'working_directory': chunk.get('working_directory', '')
+                }
+            )
+            points.append(point)
+        
+        # Upsert to Qdrant
+        if self.qdrant_service.upsert_points(collection_name, points):
+            self.stats['points_upserted'] += len(points)
+        else:
+            self.stats['points_failed'] += len(points)
+    
+    def _get_collection_name(self, project_name: str) -> str:
+        """Generate collection name for project."""
+        # Use MD5 hash for consistency with MCP server
+        project_hash = hashlib.md5(project_name.encode()).hexdigest()[:8]
+        return f"conv_{project_hash}_local"  # Note: _local suffix for FastEmbed
+    
+    def _generate_point_id(self, chunk: Dict) -> int:
+        """Generate unique point ID for chunk.
+        
+        Qdrant requires integer IDs. We generate a deterministic integer
+        from the chunk's content hash to ensure idempotency.
+        """
+        # Convert chunk_id hash to integer
+        # Take first 16 chars of hash and convert to int
+        chunk_hash = chunk['chunk_id'].replace('chunk_', '')
+        # Convert hex to int and limit to 63 bits (to fit in signed int64)
+        point_id = int(chunk_hash[:16], 16) & 0x7FFFFFFFFFFFFFFF
+        return point_id
+
+    def update_collection_info(self, collection_name: str, project_name: str):
+        """Update collection information in state."""
+        info = self.qdrant_service.get_collection_info(collection_name)
+        if info:
+            collection = CollectionInfo(
+                name=collection_name,
+                created=self.state.state['collections'].get(collection_name, {}).get('created', datetime.now(timezone.utc).isoformat()),
+                points_count=info['points_count'],
+                last_updated=datetime.now(timezone.utc).isoformat(),
+                project_name=project_name
+            )
+            self.state.update_collection(collection)
+    
+    def log_statistics(self):
+        """Log processing statistics."""
+        runtime = time.time() - self.start_time
+        logger.info("=== Statistics ===")
+        logger.info(f"Runtime: {runtime:.1f} seconds")
+        logger.info(f"Files processed: {self.stats['files_processed']}")
+        logger.info(f"Files failed: {self.stats['files_failed']}")
+        logger.info(f"Files deleted: {self.stats['files_deleted']}")
+        logger.info(f"Chunks created: {self.stats['chunks_created']}")
+        logger.info(f"Messages processed: {self.stats['messages_processed']}")
+        logger.info(f"Points upserted: {self.stats['points_upserted']}")
+        logger.info(f"Points failed: {self.stats['points_failed']}")
+        
+        # Memory usage
+        import psutil
+        process = psutil.Process(os.getpid())
+        memory = process.memory_info().rss / 1024 / 1024
+        logger.info(f"Memory usage: {memory:.1f} MB")
+
+
+def main():
+    """Main entry point."""
+    try:
+        watcher = SmartWatcher()
+        watcher.run()
+    except Exception as e:
+        logger.error(f"Fatal error: {e}", exc_info=True)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
