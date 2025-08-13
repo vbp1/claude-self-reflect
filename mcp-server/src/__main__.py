@@ -2,6 +2,7 @@
 
 import argparse
 
+
 def main():
     """Main entry point for the claude-reflect script."""
     # Parse the command-line arguments to determine the transport protocol.
@@ -19,6 +20,7 @@ def main():
     # Run the server with the specified transport
     # Disable FastMCP banner to prevent JSON output interference
     mcp.run(transport=args.transport, show_banner=False)
+
 
 if __name__ == "__main__":
     main()

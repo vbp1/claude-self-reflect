@@ -164,9 +164,7 @@ def initialize_embedding_model(model_name: str, cache_dir: str):
 
 
 # Initialize local embedding model with smart caching
-logger.info(
-    f"Initializing embedding model: {EMBEDDING_MODEL} (vector size: {VECTOR_SIZE})"
-)
+logger.info(f"Initializing embedding model: {EMBEDDING_MODEL} (vector size: {VECTOR_SIZE})")
 local_embedding_model = initialize_embedding_model(EMBEDDING_MODEL, CACHE_DIR)
 
 # Log effective configuration
@@ -241,13 +239,12 @@ async def generate_embedding(text: str) -> List[float]:
 
     # Run in executor since fastembed is synchronous
     loop = asyncio.get_event_loop()
-    embeddings = await loop.run_in_executor(
-        None, lambda: list(local_embedding_model.embed([normalized_text]))
-    )
+    embeddings = await loop.run_in_executor(None, lambda: list(local_embedding_model.embed([normalized_text])))
     return embeddings[0].tolist()
 
 
 # Helper functions for search
+
 
 def build_native_decay_query(_: list) -> FormulaQuery:
     """
@@ -261,17 +258,19 @@ def build_native_decay_query(_: list) -> FormulaQuery:
 
     decay = ExpDecayExpression(
         exp_decay=DecayParamsExpression(
-            x=DatetimeKeyExpression(datetime_key="timestamp"),   # поле с датой в payload
-            target=DatetimeExpression(datetime=current_time),    # текущее время в ISO-8601
+            x=DatetimeKeyExpression(datetime_key="timestamp"),  # поле с датой в payload
+            target=DatetimeExpression(datetime=current_time),  # текущее время в ISO-8601
             # scale в секундах (POSIX seconds), а НЕ миллисекундах:
             scale=int(DECAY_SCALE_DAYS * 24 * 60 * 60),
         )
     )
 
-    formula = SumExpression(sum=[
-        "$score",                                  # базовый скор в формуле передаётся как строка
-        MultExpression(mult=[DECAY_WEIGHT, decay]) # вес умножаем через MultExpression
-    ])
+    formula = SumExpression(
+        sum=[
+            "$score",  # базовый скор в формуле передаётся как строка
+            MultExpression(mult=[DECAY_WEIGHT, decay]),  # вес умножаем через MultExpression
+        ]
+    )
 
     return FormulaQuery(formula=formula)
 
@@ -326,9 +325,7 @@ def calculate_client_side_decay(point, min_score: float) -> Optional[float]:
         return point.score
 
 
-def convert_point_to_search_result(
-    point, min_score: float
-) -> SearchResult:
+def convert_point_to_search_result(point, min_score: float) -> SearchResult:
     """
     Convert a Qdrant point to SearchResult.
 
@@ -337,9 +334,7 @@ def convert_point_to_search_result(
     """
     # Извлекаем timestamp - обрабатываем два возможных поля:
     # 'start_timestamp' (от watcher) или 'timestamp' (от reflection)
-    timestamp_str = point.payload.get(
-        "start_timestamp", point.payload.get("timestamp", "")
-    )
+    timestamp_str = point.payload.get("start_timestamp", point.payload.get("timestamp", ""))
 
     # Нормализуем timestamp к UTC
     if timestamp_str:
@@ -360,7 +355,7 @@ def convert_point_to_search_result(
         clean_timestamp = datetime.now(timezone.utc).isoformat()
 
     # Получаем score - может быть в point.score (native) или в payload (client-side decay)
-    score = point.score if hasattr(point, 'score') and point.score is not None else point.payload.get("score")
+    score = point.score if hasattr(point, "score") and point.score is not None else point.payload.get("score")
 
     # Возвращаем только если не ниже порога
     if score is None or score < min_score:
@@ -377,7 +372,7 @@ def convert_point_to_search_result(
             conversation_id=point.payload.get("conversation_id"),
             field=point.payload.get("field"),  # Тип контента: text, code, stdout, error
             tags=point.payload.get("tags"),  # Теги для рефлексий
-    )
+        )
 
 
 async def perform_qdrant_search(
@@ -408,9 +403,7 @@ async def perform_qdrant_search(
         # Выбираем стратегию поиска на основе конфигурации
         if should_use_decay and USE_NATIVE_DECAY:
             # Вариант 1: Native decay
-            logger.info(
-                f"Using NATIVE Qdrant decay for {MAIN_COLLECTION}"
-            )
+            logger.info(f"Using NATIVE Qdrant decay for {MAIN_COLLECTION}")
 
             # Шаг 1: Строим запрос
             query_obj = build_native_decay_query(query_embedding)
@@ -421,10 +414,10 @@ async def perform_qdrant_search(
             query_result = await qdrant_client.query_points(
                 collection_name=MAIN_COLLECTION,
                 prefetch=models.Prefetch(
-                        query=query_embedding,           # вектор для кандидатов
-                        limit=limit * 3,                 # кандидатов больше, чем итоговый limit
-                        filter=search_filter,            # тот же фильтр на этапе кандидатов
-                        # using="dense",                 # если используешь named vector
+                    query=query_embedding,  # вектор для кандидатов
+                    limit=limit * 3,  # кандидатов больше, чем итоговый limit
+                    filter=search_filter,  # тот же фильтр на этапе кандидатов
+                    # using="dense",                 # если используешь named vector
                 ),
                 query=query_obj,
                 limit=limit,
@@ -478,11 +471,9 @@ async def perform_qdrant_search(
 
         # Шаг 2.2: Добавляем только если score выше порога
         for i, point in enumerate(results):
-            logger.debug(f"Processing point {i+1}/{len(results)}: id={point.id}")
+            logger.debug(f"Processing point {i + 1}/{len(results)}: id={point.id}")
             try:
-                search_result = convert_point_to_search_result(
-                        point=point, min_score=min_score
-                    )
+                search_result = convert_point_to_search_result(point=point, min_score=min_score)
                 if search_result is not None:
                     all_results.append(search_result)
                     logger.debug(f"Added result with score {search_result.score}")
@@ -498,9 +489,7 @@ async def perform_qdrant_search(
         # Шаг 4: Ограничиваем количество результатов
         all_results = all_results[:limit]
 
-        logger.info(
-                f"Found {len(all_results)} results in {MAIN_COLLECTION} with score >= {min_score}"
-            )
+        logger.info(f"Found {len(all_results)} results in {MAIN_COLLECTION} with score >= {min_score}")
 
         return all_results
 
@@ -509,6 +498,7 @@ async def perform_qdrant_search(
         logger.error(f"Exception type: {type(e).__name__}")
         logger.error(f"Search filter was: {search_filter}")
         import traceback
+
         logger.error(f"Traceback: {traceback.format_exc()}")
         raise
 
@@ -597,9 +587,7 @@ def build_search_filter(
 @mcp.tool()
 async def reflect_on_past(
     ctx: Context,
-    query: str = Field(
-        description="The search query to find semantically similar conversations"
-    ),
+    query: str = Field(description="The search query to find semantically similar conversations"),
     limit: int = Field(default=5, description="Maximum number of results to return"),
     min_score: float = Field(default=0.7, description="Minimum similarity score (0-1)"),
     use_decay: Union[int, str] = Field(
@@ -644,11 +632,7 @@ async def reflect_on_past(
 
     # Parse decay parameter using integer approach
     should_use_decay = (
-        True
-        if use_decay == 1
-        else False
-        if use_decay == 0
-        else ENABLE_MEMORY_DECAY  # -1 or any other value
+        True if use_decay == 1 else False if use_decay == 0 else ENABLE_MEMORY_DECAY  # -1 or any other value
     )
 
     # Determine project scope
@@ -666,10 +650,7 @@ async def reflect_on_past(
 
         # Build search filter using helper function
         logger.info(f"reflect_on_past: Building filter for project_name='{project_name}', tags={tags}")
-        search_filter = build_search_filter(
-            project_name=project_name,
-            tags=tags
-        )
+        search_filter = build_search_filter(project_name=project_name, tags=tags)
 
         if search_filter:
             logger.info(f"reflect_on_past: Using filter with {len(search_filter.get('must', []))} conditions")
@@ -695,18 +676,14 @@ async def reflect_on_past(
         # Sort by score and limit
         all_results.sort(key=lambda x: x.score, reverse=True)
         logger.debug(f"Total results before limiting: {len(all_results)}")
-        logger.debug(
-            f"Top 3 results: {[(r.score, r.project_name) for r in all_results[:3]]}"
-        )
+        logger.debug(f"Top 3 results: {[(r.score, r.project_name) for r in all_results[:3]]}")
         all_results = all_results[:limit]
 
         if not all_results:
             return f"No conversations found matching '{query}'. Try different keywords or check if conversations have been imported."
 
         # Format results
-        result_text = (
-            f"Found {len(all_results)} relevant conversation(s) for '{query}':\n\n"
-        )
+        result_text = f"Found {len(all_results)} relevant conversation(s) for '{query}':\n\n"
         for i, result in enumerate(all_results):
             result_text += f"**Result {i + 1}** (Score: {result.score:.3f})\n"
             # Python 3.11+ поддерживает 'Z' в fromisoformat
@@ -731,9 +708,7 @@ async def reflect_on_past(
 async def store_reflection(
     ctx: Context,
     content: str = Field(description="The insight or reflection to store"),
-    tags: List[str] = Field(
-        default=[], description="Tags to categorize this reflection"
-    ),
+    tags: List[str] = Field(default=[], description="Tags to categorize this reflection"),
     project: Optional[str] = Field(
         default=None,
         description="Target project for the reflection. If not provided, uses current project.",
