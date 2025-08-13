@@ -1,5 +1,6 @@
 """Claude Reflect MCP Server with Memory Decay."""
 
+import math
 import os
 import asyncio
 import sys
@@ -7,14 +8,24 @@ import time
 from pathlib import Path
 from typing import Optional, List, Union
 from datetime import datetime, timezone
-import numpy as np
 import logging
 import unicodedata
+import re
 
 from fastmcp import FastMCP, Context
 from pydantic import BaseModel, Field
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import PointStruct, VectorParams, Distance
+from qdrant_client import models
+from qdrant_client.models import (
+    FormulaQuery,
+    SumExpression,
+    MultExpression,
+    ExpDecayExpression,
+    DecayParamsExpression,
+    DatetimeExpression,
+    DatetimeKeyExpression,
+)
 
 from dotenv import load_dotenv
 from fastembed import TextEmbedding
@@ -47,37 +58,12 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("asyncio").setLevel(logging.WARNING)
 logging.getLogger("mcp.server.lowlevel.server").setLevel(logging.WARNING)
 
-# Try to import newer Qdrant API for native decay
-try:
-    from qdrant_client.models import (
-        Query,
-        Formula,
-        Expression,
-        MultExpression,
-        DecayParamsExpression,
-    )
-
-    NATIVE_DECAY_AVAILABLE = True
-    logger.info("Using native decay")
-except ImportError:
-    # Fall back to older API
-    from qdrant_client.models import (
-        FormulaQuery,
-        DecayParamsExpression,
-        SumExpression,
-        DatetimeExpression,
-        DatetimeKeyExpression,
-    )
-
-    NATIVE_DECAY_AVAILABLE = False
-    logger.info("Using older decay API")
-
 # Configuration
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 ENABLE_MEMORY_DECAY = os.getenv("ENABLE_MEMORY_DECAY", "false").lower() == "true"
 DECAY_WEIGHT = float(os.getenv("DECAY_WEIGHT", "0.3"))
 DECAY_SCALE_DAYS = float(os.getenv("DECAY_SCALE_DAYS", "90"))
-USE_NATIVE_DECAY = os.getenv("USE_NATIVE_DECAY", "false").lower() == "true"
+USE_NATIVE_DECAY = os.getenv("USE_NATIVE_DECAY", "true").lower() == "true"
 MCP_CLIENT_CWD = os.getenv("MCP_CLIENT_CWD", os.getcwd())
 
 # Embedding configuration
@@ -98,7 +84,8 @@ MODEL_CACHE_DAYS = int(os.getenv("MODEL_CACHE_DAYS", "7"))
 # Convert MCP_CLIENT_CWD to watcher format: /path/to/project -> -path-to-project
 if not MCP_CLIENT_CWD:
     raise ValueError("MCP_CLIENT_CWD is not set - cannot determine project")
-DEFAULT_PROJECT_NAME = MCP_CLIENT_CWD.replace("/", "-")
+# Convert slashes to dashes for project name (keeping backward compatibility)
+DEFAULT_PROJECT_NAME = re.sub(r"[\\/]+", "-", MCP_CLIENT_CWD)
 
 # Main collection for all conversations
 MAIN_COLLECTION = "claude_logs"
@@ -140,11 +127,8 @@ def initialize_embedding_model(model_name: str, cache_dir: str):
             logger.debug(f"Error reading timestamp: {e}")
             return False
 
-    # Get max age from environment
-    max_age_days = int(os.getenv("MODEL_CACHE_DAYS", "7"))
-
     # Check if model is fresh
-    model_fresh = is_model_fresh(model_name, cache_dir, max_age_days)
+    model_fresh = is_model_fresh(model_name, cache_dir, MODEL_CACHE_DAYS)
 
     if model_fresh:
         # Use offline mode
@@ -265,88 +249,31 @@ async def generate_embedding(text: str) -> List[float]:
 
 # Helper functions for search
 
-
-def build_native_decay_query_new_api(query_embedding: list) -> Query:
+def build_native_decay_query(_: list) -> FormulaQuery:
     """
-    Build native decay query using newer Qdrant API.
-
-    Formula: final_score = similarity_score + (DECAY_WEIGHT * exp(-age/scale))
-    где:
-    - similarity_score: косинусная близость между векторами (0-1)
-    - DECAY_WEIGHT: вес временного фактора (default 0.3)
-    - age: возраст документа в миллисекундах от текущего момента
-    - scale: масштаб затухания в миллисекундах (90 дней * 24 * 60 * 60 * 1000)
-    - exp(-age/scale): экспоненциальное затухание от 1 (новый) до 0 (старый)
+    Итоговая формула:
+      final_score = $score + DECAY_WEIGHT * exp_decay(timestamp → now, scale)
     """
-
-    # Настройка экспоненциального затухания
-    exp_decay = DecayParamsExpression(
-        # Поле с timestamp документа для вычисления возраста
-        x=Expression(datetime_key="timestamp"),
-        # Целевое время - текущий момент (вычисляется на сервере Qdrant)
-        target=Expression(datetime="now"),
-        # Масштаб затухания: через 90 дней score уменьшится в e раз (~2.7 раза)
-        scale=DECAY_SCALE_DAYS * 24 * 60 * 60 * 1000,  # В миллисекундах
-        # Точка, где decay_factor = 0.5 (не используется при exp_decay)
-        midpoint=0.5,
+    from datetime import datetime, timezone
+    
+    # Получаем текущее время в ISO-8601 формате
+    current_time = datetime.now(timezone.utc).isoformat()
+    
+    decay = ExpDecayExpression(
+        exp_decay=DecayParamsExpression(
+            x=DatetimeKeyExpression(datetime_key="timestamp"),   # поле с датой в payload
+            target=DatetimeExpression(datetime=current_time),    # текущее время в ISO-8601
+            # scale в секундах (POSIX seconds), а НЕ миллисекундах:
+            scale=int(DECAY_SCALE_DAYS * 24 * 60 * 60),
+        )
     )
 
-    # Множители для decay компонента: DECAY_WEIGHT * exp_decay
-    mult = [
-        # Вес decay в финальном score (0.3 = 30% веса)
-        Expression(constant=DECAY_WEIGHT),
-        # Результат экспоненциального затухания (от 1 до 0)
-        Expression(exp_decay=exp_decay),
-    ]
+    formula = SumExpression(sum=[
+        "$score",                                  # базовый скор в формуле передаётся как строка
+        MultExpression(mult=[DECAY_WEIGHT, decay]) # вес умножаем через MultExpression
+    ])
 
-    # Финальная формула: similarity + (weight * decay)
-    sum = [
-        # Базовый similarity score от Qdrant (косинусная близость)
-        Expression(variable="score"),
-        # Добавка от временного decay (может увеличить score для свежих документов)
-        Expression(mult=MultExpression(mult=mult)),
-    ]
-
-    return Query(nearest=query_embedding, formula=Formula(sum=sum))
-
-
-def build_native_decay_query_legacy_api(query_embedding: list) -> FormulaQuery:
-    """
-    Build native decay query using legacy Qdrant API.
-
-    Та же формула, но с другим синтаксисом API:
-    final_score = similarity_score + (DECAY_WEIGHT * exp(-age/scale))
-    """
-    # Шаг 1: Настраиваем функцию экспоненциального затухания
-    exp_decay = DatetimeExpression(
-        # Поле timestamp для вычисления возраста документа
-        x=DatetimeKeyExpression(key="timestamp"),
-        # Текущее время (вычисляется на сервере Qdrant)
-        target=DatetimeExpression(datetime="now"),
-        # Масштаб в миллисекундах (90 дней * 24 часа * 60 минут * 60 секунд * 1000 мс)
-        scale=DECAY_SCALE_DAYS * 24 * 60 * 60 * 1000,
-        # Не используется для exp_decay
-        midpoint=0.5,
-    )
-
-    # Шаг 2: Создаём взвешенный decay компонент
-    mult = DecayParamsExpression(
-        # Вес decay компонента (0.3 = 30% влияния на финальный score)
-        weight=DECAY_WEIGHT,
-        # Функция затухания от шага 1
-        exp_decay=exp_decay,
-    )
-
-    # Шаг 3: Собираем финальную формулу как сумму компонентов
-    sum = [
-        # Базовый similarity score от Qdrant (косинусная близость)
-        Expression(variable="score"),
-        # Добавка за свежесть документа (может увеличить score для новых документов)
-        Expression(mult=mult),
-    ]
-
-    # Шаг 4: Создаём запрос с формулой
-    return FormulaQuery(nearest=query_embedding, formula=SumExpression(sum=sum))
+    return FormulaQuery(formula=formula)
 
 
 def calculate_client_side_decay(point, min_score: float) -> Optional[float]:
@@ -381,18 +308,18 @@ def calculate_client_side_decay(point, min_score: float) -> Optional[float]:
         current_time = datetime.now(timezone.utc)
 
         # Вычисляем возраст документа в днях
-        age_seconds = (current_time - point_time).total_seconds()
+        age_seconds = max(0.0, (current_time - point_time).total_seconds())
         age_days = age_seconds / (24 * 60 * 60)
 
         # Экспоненциальное затухание: exp(-age/scale)
         # При age=0: decay=1.0, age=90: decay≈0.37, age=180: decay≈0.14
-        decay_factor = np.exp(-age_days / DECAY_SCALE_DAYS)
+        decay_factor = math.exp(-age_days / DECAY_SCALE_DAYS)
 
         # Взвешенная комбинация: 70% similarity + 30% freshness
         final_score = (1 - DECAY_WEIGHT) * point.score + DECAY_WEIGHT * decay_factor
 
-        # Возвращаем только если выше порога
-        return final_score if final_score >= min_score else None
+        return final_score
+
     except (ValueError, TypeError) as e:
         logger.debug(f"Error parsing timestamp: {e}")
         # При ошибке парсинга возвращаем базовый score
@@ -400,7 +327,7 @@ def calculate_client_side_decay(point, min_score: float) -> Optional[float]:
 
 
 def convert_point_to_search_result(
-    point, score: float, project_name: str
+    point, min_score: float
 ) -> SearchResult:
     """
     Convert a Qdrant point to SearchResult.
@@ -432,17 +359,24 @@ def convert_point_to_search_result(
         # Если нет timestamp, используем текущее время
         clean_timestamp = datetime.now(timezone.utc).isoformat()
 
-    return SearchResult(
-        id=str(point.id),
-        score=score,  # Может быть с decay или без
-        timestamp=clean_timestamp,
-        # Используем start_role если есть, иначе role, иначе 'unknown'
-        role=point.payload.get("start_role", point.payload.get("role", "unknown")),
-        excerpt=point.payload.get("text", ""),
-        project_name=project_name,
-        conversation_id=point.payload.get("conversation_id"),
-        field=point.payload.get("field"),  # Тип контента: text, code, stdout, error
-        tags=point.payload.get("tags"),  # Теги для рефлексий
+    # Получаем score - может быть в point.score (native) или в payload (client-side decay)
+    score = point.score if hasattr(point, 'score') and point.score is not None else point.payload.get("score")
+    
+    # Возвращаем только если не ниже порога
+    if score is None or score < min_score:
+        return None
+    else:
+        return SearchResult(
+            id=str(point.id),
+            score=score,  # Используем найденный score
+            timestamp=clean_timestamp,
+            # Используем start_role если есть, иначе role, иначе 'unknown'
+            role=point.payload.get("start_role", point.payload.get("role", "unknown")),
+            excerpt=point.payload.get("text", ""),
+            project_name=point.payload.get("project_name", point.payload.get("project", "unknown")),
+            conversation_id=point.payload.get("conversation_id"),
+            field=point.payload.get("field"),  # Тип контента: text, code, stdout, error
+            tags=point.payload.get("tags"),  # Теги для рефлексий
     )
 
 
@@ -465,109 +399,118 @@ async def perform_qdrant_search(
     all_results = []
 
     try:
-        logger.debug(f"Searching in collection: {MAIN_COLLECTION}")
+        logger.info(f"Searching in collection: {MAIN_COLLECTION}")
+        logger.info(f"Search filter: {search_filter}")
+        logger.info(f"Limit: {limit}, Min score: {min_score}")
+        logger.info(f"Should use decay: {should_use_decay}, USE_NATIVE_DECAY: {USE_NATIVE_DECAY}")
+        logger.info(f"Query embedding length: {len(query_embedding) if query_embedding else 0}")
 
         # Выбираем стратегию поиска на основе конфигурации
-        if should_use_decay and USE_NATIVE_DECAY and NATIVE_DECAY_AVAILABLE:
-            # Вариант 1: Native decay с новым API (самый эффективный)
-            logger.debug(f"Using NATIVE Qdrant decay (new API) for {MAIN_COLLECTION}")
-
-            # Шаг 1: Строим запрос с формулой decay
-            query_obj = build_native_decay_query_new_api(query_embedding)
-
-            # Шаг 2: Выполняем поиск с decay на стороне Qdrant
-            results = await qdrant_client.query_points(
-                collection_name=MAIN_COLLECTION,
-                query=query_obj,
-                limit=limit,
-                with_payload=True,  # Включаем payload для получения метаданных
-                query_filter=search_filter,  # Фильтр по проекту, если задан
+        if should_use_decay and USE_NATIVE_DECAY:
+            # Вариант 1: Native decay
+            logger.info(
+                f"Using NATIVE Qdrant decay for {MAIN_COLLECTION}"
             )
 
-        elif should_use_decay and USE_NATIVE_DECAY and not NATIVE_DECAY_AVAILABLE:
-            # Вариант 2: Native decay со старым API (совместимость)
-            logger.debug(
-                f"Using NATIVE Qdrant decay (legacy API) for {MAIN_COLLECTION}"
-            )
-
-            # Шаг 1: Строим запрос для старого API
-            query_obj = build_native_decay_query_legacy_api(query_embedding)
+            # Шаг 1: Строим запрос
+            query_obj = build_native_decay_query(query_embedding)
+            logger.info("Native decay query object created")
 
             # Шаг 2: Выполняем поиск с decay на стороне Qdrant
-            results = await qdrant_client.query_points(
+            logger.info("Executing query_points with native decay...")
+            query_result = await qdrant_client.query_points(
                 collection_name=MAIN_COLLECTION,
+                prefetch=models.Prefetch(
+                        query=query_embedding,           # вектор для кандидатов
+                        limit=limit * 3,                 # кандидатов больше, чем итоговый limit
+                        filter=search_filter,            # тот же фильтр на этапе кандидатов
+                        # using="dense",                 # если используешь named vector
+                ),
                 query=query_obj,
                 limit=limit,
                 with_payload=True,
                 query_filter=search_filter,
+                with_vectors=False,
             )
+            results = query_result.points
+            logger.info(f"Native decay query returned {len(results)} points")
 
         elif should_use_decay:
-            # Вариант 3: Client-side decay (когда native недоступен)
-            logger.debug(f"Using CLIENT-SIDE decay for {MAIN_COLLECTION}")
+            # Вариант 2: Client-side decay (когда native недоступен)
+            logger.info(f"Using CLIENT-SIDE decay for {MAIN_COLLECTION}")
 
             # Шаг 1: Получаем больше кандидатов без фильтра по score
             # (умножаем limit на 3, так как часть отсеется после decay)
-            results = await qdrant_client.search(
+            logger.info("Executing query_points for client-side decay...")
+            query_result = await qdrant_client.query_points(
                 collection_name=MAIN_COLLECTION,
-                query_vector=query_embedding,
+                query=query_embedding,
                 limit=limit * 3,  # Берём с запасом для последующей фильтрации
                 with_payload=True,
                 query_filter=search_filter,  # Фильтр по проекту
+                with_vectors=False,
             )
+            results = query_result.points
 
             # Шаг 2: Применяем client-side decay к каждому результату
             for point in results:
-                # Шаг 2.1: Вычисляем score с учётом возраста документа
                 final_score = calculate_client_side_decay(point, min_score)
-
-                # Шаг 2.2: Добавляем только если score выше порога после decay
-                if final_score is not None:
-                    point_project = point.payload.get("project_name", "unknown")
-                    all_results.append(
-                        convert_point_to_search_result(
-                            point, final_score, point_project
-                        )
-                    )
-
-            # Шаг 3: Сортируем по убыванию финального score
-            all_results.sort(key=lambda x: x.score, reverse=True)
-
-            # Шаг 4: Ограничиваем количество результатов
-            all_results = all_results[:limit]
-
-            # Возвращаем раньше, так как обработка завершена
-            return all_results
+                point.payload.update({"score": final_score})
 
         else:
-            # Вариант 4: Стандартный поиск без decay
+            # Вариант 3: Стандартный поиск без decay
             # Шаг 1: Обычный векторный поиск с порогом similarity
-            results = await qdrant_client.search(
+            logger.info(f"Using STANDARD search without decay for {MAIN_COLLECTION}")
+            logger.info(f"Executing query_points with score_threshold={min_score}...")
+            query_result = await qdrant_client.query_points(
                 collection_name=MAIN_COLLECTION,
-                query_vector=query_embedding,
+                query=query_embedding,
                 limit=limit,
                 with_payload=True,
                 score_threshold=min_score,  # Фильтруем по минимальному score
                 query_filter=search_filter,  # Фильтр по проекту
+                with_vectors=False,
             )
-            logger.debug(
-                f"Found {len(results)} results in {MAIN_COLLECTION} with score >= {min_score}"
-            )
+            results = query_result.points
 
         # Шаг финальный: Обрабатываем результаты от Qdrant
-        for point in results:
-            if should_use_decay and USE_NATIVE_DECAY:
-                logger.debug(f"Point score with decay: {point.score}")
-            point_project = point.payload.get("project_name", "unknown")
-            all_results.append(
-                convert_point_to_search_result(point, point.score, point_project)
+        logger.info(f"Processing {len(results)} results from Qdrant")
+            
+        # Шаг 2.2: Добавляем только если score выше порога
+        for i, point in enumerate(results):
+            logger.debug(f"Processing point {i+1}/{len(results)}: id={point.id}")
+            try:
+                search_result = convert_point_to_search_result(
+                        point=point, min_score=min_score
+                    )
+                if search_result is not None:
+                    all_results.append(search_result)
+                    logger.debug(f"Added result with score {search_result.score}")
+                else:
+                    logger.debug(f"Filtered out result below min_score {min_score}")
+            except Exception as e:
+                logger.error(f"Error converting point {point.id}: {str(e)}")
+                continue
+
+        # Шаг 3: Сортируем по убыванию финального score
+        all_results.sort(key=lambda x: x.score, reverse=True)
+
+        # Шаг 4: Ограничиваем количество результатов
+        all_results = all_results[:limit]
+
+        logger.info(
+                f"Found {len(all_results)} results in {MAIN_COLLECTION} with score >= {min_score}"
             )
+
+        return all_results
 
     except Exception as e:
         logger.error(f"Error searching {MAIN_COLLECTION}: {str(e)}")
+        logger.error(f"Exception type: {type(e).__name__}")
+        logger.error(f"Search filter was: {search_filter}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
         raise
-
-    return all_results
 
 
 def resolve_project_name(project: Optional[str], context: str = "") -> str:
@@ -609,7 +552,7 @@ def build_search_filter(
     
     Args:
         project_name: Project name to filter by. Use "all" to skip project filtering.
-        tags: List of tags to filter by (OR condition - matches any tag).
+        tags: List of tags to filter by (AND condition - must have ALL tags).
         additional_conditions: Additional filter conditions to include.
     
     Returns:
@@ -618,7 +561,8 @@ def build_search_filter(
     Example:
         >>> build_search_filter(project_name="my-project", tags=["bug", "feature"])
         {'must': [{'key': 'project_name', 'match': {'value': 'my-project'}},
-                  {'key': 'tags', 'match': {'any': ['bug', 'feature']}}]}
+                  {'key': 'tags', 'match': {'value': 'bug'}},
+                  {'key': 'tags', 'match': {'value': 'feature'}}]}
     """
     must_conditions = []
     
@@ -627,10 +571,12 @@ def build_search_filter(
         logger.debug(f"build_search_filter: Adding project filter for '{project_name}'")
         must_conditions.append({"key": "project_name", "match": {"value": project_name}})
     
-    # Add tags filter if tags are specified
+    # Add tags filter if tags are specified (AND condition - must have ALL tags)
     if tags:
-        logger.debug(f"build_search_filter: Adding tags filter for {tags}")
-        must_conditions.append({"key": "tags", "match": {"any": tags}})
+        logger.debug(f"build_search_filter: Adding tags filter for {tags} (AND condition)")
+        # Each tag gets its own condition to ensure ALL tags must be present
+        for tag in tags:
+            must_conditions.append({"key": "tags", "match": {"value": tag}})
     
     # Add any additional conditions
     if additional_conditions:
@@ -664,9 +610,9 @@ async def reflect_on_past(
         default=None,
         description="Search specific project only. If not provided, searches current project based on working directory. Use 'all' to search across all projects.",
     ),
-    tags: Optional[List[str]] = Field(
+    tags: Optional[Union[List[str], str]] = Field(
         default=None,
-        description="Optional tags to filter results. Only results with at least one of these tags will be returned. If not specified, all results are returned regardless of tags.",
+        description="Optional tags to filter results. Only results with ALL specified tags will be returned. Can be a list of strings or comma-separated string. If not specified, all results are returned regardless of tags.",
     ),
 ) -> str:
     """Search for relevant past conversations using semantic search with optional time decay and tag filtering."""
@@ -678,7 +624,16 @@ async def reflect_on_past(
     logger.debug(f"  min_score: {min_score}")
     logger.debug(f"  use_decay: {use_decay}")
     logger.debug(f"  project: {project}")
-    logger.debug(f"  tags: {tags}")
+    logger.debug(f"  tags: {tags} (type: {type(tags)})")
+    
+    # Parse tags if they come as a string
+    if tags is not None:
+        if isinstance(tags, str):
+            # Handle comma-separated string
+            tags = [tag.strip() for tag in tags.split(",") if tag.strip()]
+        elif not isinstance(tags, list):
+            # Try to handle other formats
+            tags = [str(tags)]
 
     # Normalize use_decay to integer
     if isinstance(use_decay, str):
@@ -704,11 +659,13 @@ async def reflect_on_past(
         query_embedding = await generate_embedding(query)
 
         # Check if main collection exists
-        collections = await qdrant_client.get_collections()
-        if not any(c.name == MAIN_COLLECTION for c in collections.collections):
+        try:
+            await qdrant_client.get_collection(MAIN_COLLECTION)
+        except Exception:
             return f"Collection '{MAIN_COLLECTION}' not found."
 
         # Build search filter using helper function
+        logger.info(f"reflect_on_past: Building filter for project_name='{project_name}', tags={tags}")
         search_filter = build_search_filter(
             project_name=project_name,
             tags=tags
@@ -716,10 +673,12 @@ async def reflect_on_past(
         
         if search_filter:
             logger.info(f"reflect_on_past: Using filter with {len(search_filter.get('must', []))} conditions")
+            logger.info(f"reflect_on_past: Full filter: {search_filter}")
         else:
             logger.info("reflect_on_past: No filters applied - searching all content")
 
         # Perform search using helper function
+        logger.info("reflect_on_past: Calling perform_qdrant_search...")
         try:
             all_results = await perform_qdrant_search(
                 query_embedding=query_embedding,

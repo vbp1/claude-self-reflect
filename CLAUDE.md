@@ -20,22 +20,6 @@ Digital memory systems face a fundamental challenge: perfect recall creates impe
 3. **Mimicking Human Memory**: Aligning with natural cognitive patterns
 4. **Maintaining Performance**: Preventing unbounded growth issues
 
-### Implementation
-Currently using client-side decay calculation (v1.3.1):
-- **Active**: Client-side exponential decay with 90-day half-life
-- **Performance**: Minimal overhead (~9ms for 1000 points)
-
-## Current Status
-- **Projects Imported**: 24
-- **Conversation Chunks**: 10,165+
-- **Collections**: Per-project isolation with `conv_<md5>_local` naming
-- **Search Accuracy**: 66.1% with cross-collection overhead ~100ms
-- **Private**: Local embeddings ensure privacy - no data sent to external APIs
-
-## Key Commands
-
-**📖 IMPORTANT**: For comprehensive MCP usage, see [MCP_REFERENCE.md](./MCP_REFERENCE.md)
-
 ### MCP Management in Claude Code
 
 #### CORRECT Commands (Use These):
