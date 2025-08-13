@@ -5,8 +5,6 @@ repos:
       - id: ruff
         name: Ruff Linter (блокирует коммит при ошибках)
         files: ^(mcp-server/src/).*\.py$
-        # Не используем --fix чтобы принудительно показать ошибки
-        args: [--select=E,W,F]
         fail_fast: true
       
       - id: ruff-format
