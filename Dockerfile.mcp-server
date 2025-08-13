@@ -24,6 +24,7 @@ RUN apt-get update && \
 
 # Copy the MCP server package files
 COPY mcp-server/pyproject.toml ./
+COPY mcp-server/README.md ./
 COPY mcp-server/src ./src
 
 # Upgrade pip and install the package in production mode
