@@ -2,7 +2,6 @@
 name = "claude-self-reflect-mcp"
 version = "0.2.0"
 description = "MCP server for Claude self-reflection with semantic search and memory decay"
-readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 keywords = [
