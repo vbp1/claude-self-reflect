@@ -2,6 +2,7 @@
 name = "claude-self-reflect-mcp"
 version = "0.2.0"
 description = "MCP server for Claude self-reflection with semantic search and memory decay"
+readme = "../README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 keywords = [
@@ -45,3 +46,14 @@ packages = ["src"]
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 200
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "W", "F"]
+ignore = []
+
+[tool.ruff.format]
+line-length = 200
