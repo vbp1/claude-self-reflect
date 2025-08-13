@@ -1,0 +1,14 @@
+Testing library and framework used:
+- Python's built-in unittest framework to avoid introducing new dependencies.
+- If PyYAML is already available in the environment, tests will parse the workflow as structured YAML for stricter assertions.
+- If PyYAML is not available, tests fall back to robust textual assertions to validate critical aspects.
+
+To run the tests:
+- python -m unittest tests/test_github_ci_workflow.py
+- Or integrate with pytest (if present) by simply running `pytest`. Pytest will discover unittest test cases automatically.
+
+These tests validate the .github/workflows/ci.yml file according to the current diff:
+- Ensures the triggers (push, pull_request, and release) are configured as intended.
+- Verifies permissions block.
+- Confirms presence and composition of jobs: pre-commit, python-check, docker-build, and create-github-release.
+- Checks critical Docker and release asset steps.
