@@ -37,7 +37,7 @@ RUN useradd -m -u 1000 -s /bin/bash mcpuser && \
 
 # Create necessary directories with proper permissions
 RUN mkdir -p /home/mcpuser/.cache/huggingface \
-    chown -R mcpuser:mcpuser /home/mcpuser/.cache \
+    && chown -R mcpuser:mcpuser /home/mcpuser/.cache
 
 # Set environment variables for model caching
 ENV TRANSFORMERS_CACHE=/home/mcpuser/.cache/huggingface \
