@@ -12,9 +12,9 @@ RUN pip install --no-cache-dir -e .
 # Create a non-root user
 RUN useradd -m -u 1000 mcpuser
 
-# Create cache directory with proper permissions
+# Create cache directories with proper permissions
 RUN mkdir -p /home/mcpuser/.cache/huggingface && \
-    chown -R mcpuser:mcpuser /home/mcpuser/.cache
+    chown -R mcpuser:mcpuser /home/mcpuser/.cache/huggingface
 
 USER mcpuser
 

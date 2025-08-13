@@ -28,6 +28,7 @@ COPY scripts/import-watcher-smart.py /scripts/
 RUN chmod +x /scripts/*.py
 
 RUN mkdir -p /app/state && chown -R watcher:watcher /app/state
+RUN mkdir -p /home/watcher/.cache/huggingface && chown -R watcher:watcher /home/watcher/.cache/huggingface
 
 # Set working directory
 WORKDIR /app

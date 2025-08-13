@@ -72,8 +72,14 @@ USE_NATIVE_DECAY = os.getenv('USE_NATIVE_DECAY', 'false').lower() == 'true'
 MCP_CLIENT_CWD = os.getenv('MCP_CLIENT_CWD', os.getcwd())
 
 # Embedding configuration
-EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL', 'intfloat/multilingual-e5-large')
-VECTOR_SIZE = int(os.getenv('VECTOR_SIZE', '1024'))
+# Required environment variables
+if not os.getenv('EMBEDDING_MODEL'):
+    raise ValueError("EMBEDDING_MODEL environment variable must be set")
+if not os.getenv('VECTOR_SIZE'):
+    raise ValueError("VECTOR_SIZE environment variable must be set")
+
+EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL')
+VECTOR_SIZE = int(os.getenv('VECTOR_SIZE'))
 
 # Smart model initialization with age check
 def is_model_fresh(model_name: str, cache_dir: str, max_age_days: int = 7) -> bool:
@@ -133,15 +139,18 @@ def initialize_embedding_model(model_name: str, cache_dir: str):
         os.environ['TRANSFORMERS_OFFLINE'] = '0'
         os.environ['HF_HUB_OFFLINE'] = '0'
     
-    try:
-        model = TextEmbedding(model_name=model_name)
-        
+    try:        
         # Update timestamp file after successful initialization
         model_cache_path = Path(cache_dir) / model_name.replace('/', '_')
         timestamp_file = model_cache_path / ".timestamp"
         
         # Ensure directory exists
         model_cache_path.mkdir(parents=True, exist_ok=True)
+
+        model = TextEmbedding(
+            model_name=model_name,
+            cache_dir=model_cache_path
+        )
         
         # Write current timestamp
         with open(timestamp_file, 'w') as f:
@@ -160,11 +169,14 @@ MODEL_CACHE_DAYS = int(os.getenv('MODEL_CACHE_DAYS', '7'))
 HF_HOME = os.getenv('HF_HOME', None)
 
 # Initialize local embedding model with smart caching
+logger.info(f"Initializing embedding model: {EMBEDDING_MODEL} (vector size: {VECTOR_SIZE})")
 local_embedding_model = initialize_embedding_model(EMBEDDING_MODEL, CACHE_DIR)
 
 # Log effective configuration
 logger.info("Effective configuration:")
 logger.info(f"QDRANT_URL: {QDRANT_URL}")
+logger.info(f"EMBEDDING_MODEL: {EMBEDDING_MODEL}")
+logger.info(f"VECTOR_SIZE: {VECTOR_SIZE}")
 logger.info(f"ENABLE_MEMORY_DECAY: {ENABLE_MEMORY_DECAY}")
 logger.info(f"USE_NATIVE_DECAY: {USE_NATIVE_DECAY}")
 logger.info(f"DECAY_WEIGHT: {DECAY_WEIGHT}")
@@ -174,8 +186,14 @@ logger.info(f"VECTOR_SIZE: {VECTOR_SIZE}")
 logger.info(f"TRANSFORMERS_CACHE: {CACHE_DIR}")
 logger.info(f"HF_HOME: {HF_HOME or 'not set'}")
 logger.info(f"MODEL_CACHE_DAYS: {MODEL_CACHE_DAYS}")
+# Determine project name that will be used for all searches
+# Convert MCP_CLIENT_CWD to watcher format: /path/to/project -> -path-to-project
+if not MCP_CLIENT_CWD:
+    raise ValueError("MCP_CLIENT_CWD is not set - cannot determine project")
+
+DEFAULT_PROJECT_NAME = MCP_CLIENT_CWD.replace('/', '-')
 logger.info(f"MCP_CLIENT_CWD: {MCP_CLIENT_CWD}")
-logger.debug(f"env_path: {env_path}")
+logger.info(f"Default project name for searches: {DEFAULT_PROJECT_NAME}")
 
 
 class SearchResult(BaseModel):
@@ -188,6 +206,7 @@ class SearchResult(BaseModel):
     project_name: str
     conversation_id: Optional[str] = None
     collection_name: str
+    field: Optional[str] = None  # Тип контента: text, code, stdout, error
 
 
 # Initialize FastMCP instance
@@ -199,72 +218,19 @@ mcp = FastMCP(
 # Create Qdrant client
 qdrant_client = AsyncQdrantClient(url=QDRANT_URL)
 
-# Collection metadata constants
-METADATA_COLLECTION = "collection_metadata_local"
+# Main collection for all conversations
+MAIN_COLLECTION = "claude_logs"
 
-async def get_all_collections_metadata() -> List[Dict[str, Any]]:
-    """Get metadata for all collections from the metadata collection."""
-    try:
-        # Check if metadata collection exists
-        collections = await qdrant_client.get_collections()
-        if METADATA_COLLECTION not in [c.name for c in collections.collections]:
-            raise ValueError(f"Metadata collection {METADATA_COLLECTION} not found")
-        
-        # Get all metadata points
-        points, _ = await qdrant_client.scroll(
-            collection_name=METADATA_COLLECTION,
-            limit=1000,  # Should be enough for all collections
-            with_payload=True
-        )
-        
-        metadata_list = []
-        for point in points:
-            metadata_list.append(point.payload)
-        
-        return metadata_list
-        
-    except Exception as e:
-        logger.error(f"Failed to get collections metadata: {e}")
-        return []
+# Removed get_all_collections_metadata - no longer needed with single collection
 
-def find_project_collections_by_path(git_root_path: str, all_metadata: List[Dict[str, Any]]) -> List[str]:
-    """Find collections for project and its subprojects using structural path analysis."""
-    # Convert git path to watcher format: /home/user/project -> -home-user-project
-    project_path = git_root_path.replace('/', '-')
-    if project_path.startswith('-'):
-        project_path = project_path[1:]  # Remove leading dash
-    project_path = '-' + project_path  # Add leading dash for watcher format
-    
-    project_parts = project_path.split('-')  # ['', 'home', 'user', 'project']
-    
-    logger.debug(f"find_project_collections_by_path: git_root_path={git_root_path}")
-    logger.debug(f"find_project_collections_by_path: converted project_path={project_path}")
-    logger.debug(f"find_project_collections_by_path: project_parts={project_parts}")
-    
-    matching_collections = []
-    for metadata in all_metadata:
-        stored_path = metadata.get("project_path", "")
-        stored_parts = stored_path.split('-')
-        
-        # Check if stored_path is a subpath of project_path
-        if len(stored_parts) >= len(project_parts):
-            if stored_parts[:len(project_parts)] == project_parts:
-                logger.debug(f"find_project_collections_by_path: MATCH {metadata['collection_name']} (stored_path={stored_path})")
-                matching_collections.append(metadata["collection_name"])
-            else:
-                logger.debug(f"find_project_collections_by_path: NO MATCH {metadata['collection_name']} (parts don't match)")
-        else:
-            logger.debug(f"find_project_collections_by_path: NO MATCH {metadata['collection_name']} (stored path shorter)")
-    
-    logger.debug(f"find_project_collections_by_path: returning {len(matching_collections)} collections")
-    return matching_collections
+# Removed find_project_collections_by_path - no longer needed with single collection
     
 async def get_all_collections() -> List[str]:
-    """Get all collections (local embeddings only)."""
+    """Get all collections (claude_logs and reflections)."""
     collections = await qdrant_client.get_collections()
-    # Support _local collections and reflections
+    # Support claude_logs and reflections collections
     return [c.name for c in collections.collections 
-            if c.name.endswith('_local') or c.name.startswith('reflections')]
+            if c.name == 'claude_logs' or c.name.startswith('reflections')]
 
 async def generate_embedding(text: str) -> List[float]:
     """Generate embedding using local FastEmbed model."""
@@ -322,64 +288,51 @@ async def reflect_on_past(
     
     # Determine project scope
     if project is None:
-        target_project = MCP_CLIENT_CWD
+        # Use default project name determined at startup
+        project_name = DEFAULT_PROJECT_NAME
+        logger.info(f"reflect_on_past: No project specified, using default: {project_name}")
+    elif project == 'all':
+        project_name = 'all'
+        logger.info(f"reflect_on_past: Searching across all projects")
     else:
-        target_project = project
-
-    logger.debug(f"Project name: {target_project}")
+        # Convert user-provided project to watcher format
+        project_name = project.replace('/', '-') if '/' in project else project
+        logger.info(f"reflect_on_past: Using specified project: {project_name}")
  
     try:
         # Generate embedding
         query_embedding = await generate_embedding(query)
         
-        # Get all collections and their metadata
+        # Check if claude_logs collection exists
         all_collections = await get_all_collections()
-        if not all_collections:
-            return "No conversation collections found. Please import conversations first."
+        if 'claude_logs' not in all_collections:
+            return "No conversation collection found. Please import conversations first."
         
-        all_metadata = await get_all_collections_metadata()
-        # Debug: Show metadata for each collection
-        for metadata in all_metadata:
-            logger.debug(f"Found metadata: {metadata.get('collection_name')} -> {metadata.get('project_path')}")
-        
-        # Filter collections by project if not searching all
-        collections_to_search = []
-        logger.debug(f"Filtering collections: target_project={target_project}, all_collections={len(all_collections)}")
-        if target_project != 'all':           
-            collections_to_search = find_project_collections_by_path(target_project, all_metadata)
-            logger.debug(f"Found {len(collections_to_search)} collections via metadata search")
-            logger.debug(f"Collections found: {collections_to_search}")
-            
-            # Always include reflections_local if it exists for project-specific searches
-            if 'reflections_local' in all_collections and 'reflections_local' not in collections_to_search:
-                collections_to_search.append('reflections_local')
-                logger.debug("Added reflections_local to search collections")
-          
-            if not collections_to_search:
-                logger.debug("No matching collections found, falling back to all collections")
-                collections_to_search = all_collections
-            
-            # Show metadata for found collections
-            for collection_name in collections_to_search:
-                # Find metadata for this collection
-                collection_metadata = next((m for m in all_metadata if m.get('collection_name') == collection_name), None)
-                if collection_metadata:
-                    logger.debug(f"Searching will be performed in collection: {collection_name} -> Path: {collection_metadata.get('project_path', 'unknown')}")
+        # Build search filter based on project
+        search_filter = None
+        if project_name != 'all':
+            logger.info(f"reflect_on_past: Creating filter for project_name={project_name}")
+            search_filter = {
+                "must": [
+                    {
+                        "key": "project_name",
+                        "match": {"value": project_name}
+                    }
+                ]
+            }
         else:
-            collections_to_search = all_collections
-            logger.debug(f"Using all collections for project='all': {collections_to_search}")
+            logger.info("reflect_on_past: No filter - searching across all projects")
         
-        logger.debug(f"Searching across {len(collections_to_search)} collections: {collections_to_search[:3]}...")
-        logger.debug(f"Searching across {len(collections_to_search)} collections")
+        logger.debug("Searching in claude_logs collection")
         logger.debug("Using local FastEmbed embeddings")
         
         all_results = []
         
-        # Search each collection
-        for collection_name in collections_to_search:
-            try:
-                logger.debug(f"Searching in collection: {collection_name}")
-                if should_use_decay and USE_NATIVE_DECAY and NATIVE_DECAY_AVAILABLE:
+        # Search in claude_logs collection
+        collection_name = 'claude_logs'
+        try:
+            logger.debug(f"Searching in collection: {collection_name}")
+            if should_use_decay and USE_NATIVE_DECAY and NATIVE_DECAY_AVAILABLE:
                     # Use native Qdrant decay with newer API
                     logger.debug(f"Using NATIVE Qdrant decay (new API) for {collection_name}")
                     
@@ -422,9 +375,10 @@ async def reflect_on_past(
                         query=query_obj,
                         limit=limit,
                         score_threshold=min_score,
-                        with_payload=True
+                        with_payload=True,
+                        query_filter=search_filter  # Apply project filter
                     )
-                elif should_use_decay and USE_NATIVE_DECAY and not NATIVE_DECAY_AVAILABLE:
+            elif should_use_decay and USE_NATIVE_DECAY and not NATIVE_DECAY_AVAILABLE:
                     # Use native Qdrant decay with older API
                     logger.debug(f"Using NATIVE Qdrant decay (legacy API) for {collection_name}")
                     
@@ -465,7 +419,8 @@ async def reflect_on_past(
                         query=query_obj,
                         limit=limit,
                         score_threshold=min_score,
-                        with_payload=True
+                        with_payload=True,
+                        query_filter=search_filter  # Apply project filter
                     )
                     
                     # Process results from native decay search
@@ -474,18 +429,9 @@ async def reflect_on_past(
                         raw_timestamp = point.payload.get('timestamp', datetime.now(timezone.utc).isoformat())
                         clean_timestamp = raw_timestamp.replace('Z', '+00:00') if raw_timestamp.endswith('Z') else raw_timestamp
                         
-                        # Check project filter if we're searching all collections but want specific project
-                        point_project = point.payload.get('project', collection_name.replace('conv_', '').replace('_local', ''))
+                        # Get project name from payload
+                        point_project = point.payload.get('project_name', 'unknown')
                         
-                        # Handle project matching - check if the target project name appears at the end of the stored project path
-                        if target_project != 'all' and len(collections_to_search) == len(all_collections):
-                            # The stored project name is like "-Users-ramakrishnanannaswamy-projects-ShopifyMCPMockShop"
-                            # We want to match just "ShopifyMCPMockShop"
-                            logger.debug(f"Project filter active: target={target_project}, point_project={point_project}, score={point.score}")
-                            if not point_project.endswith(f"-{target_project}") and point_project != target_project:
-                                logger.debug(f"Skipping result from different project: {point_project}")
-                                continue  # Skip results from other projects
-                            
                         all_results.append(SearchResult(
                             id=str(point.id),
                             score=point.score,  # Score already includes decay
@@ -494,10 +440,11 @@ async def reflect_on_past(
                             excerpt=(point.payload.get('text', '')[:500] + '...'),
                             project_name=point_project,
                             conversation_id=point.payload.get('conversation_id'),
-                            collection_name=collection_name
+                            collection_name=collection_name,
+                            field=point.payload.get('field')  # Тип контента
                         ))
                     
-                elif should_use_decay:
+            elif should_use_decay:
                     # Use client-side decay (existing implementation)
                     logger.debug(f"Using CLIENT-SIDE decay for {collection_name}")
                     
@@ -506,7 +453,8 @@ async def reflect_on_past(
                         collection_name=collection_name,
                         query_vector=query_embedding,
                         limit=limit * 3,  # Get more candidates for decay filtering
-                        with_payload=True
+                        with_payload=True,
+                        query_filter=search_filter  # Apply project filter
                     )
                     
                     # Apply decay scoring manually
@@ -555,18 +503,9 @@ async def reflect_on_past(
                         raw_timestamp = point.payload.get('timestamp', datetime.now(timezone.utc).isoformat())
                         clean_timestamp = raw_timestamp.replace('Z', '+00:00') if raw_timestamp.endswith('Z') else raw_timestamp
                         
-                        # Check project filter if we're searching all collections but want specific project
-                        point_project = point.payload.get('project', collection_name.replace('conv_', '').replace('_local', ''))
+                        # Get project name from payload
+                        point_project = point.payload.get('project_name', 'unknown')
                         
-                        # Handle project matching - check if the target project name appears at the end of the stored project path
-                        if target_project != 'all' and len(collections_to_search) == len(all_collections):
-                            # The stored project name is like "-Users-ramakrishnanannaswamy-projects-ShopifyMCPMockShop"
-                            # We want to match just "ShopifyMCPMockShop"
-                            logger.debug(f"Project filter active: target={target_project}, point_project={point_project}, score={point.score}")
-                            if not point_project.endswith(f"-{target_project}") and point_project != target_project:
-                                logger.debug(f"Skipping result from different project: {point_project}")
-                                continue  # Skip results from other projects
-                            
                         all_results.append(SearchResult(
                             id=str(point.id),
                             score=adjusted_score,  # Use adjusted score
@@ -575,16 +514,18 @@ async def reflect_on_past(
                             excerpt=(point.payload.get('text', '')[:500] + '...'),
                             project_name=point_project,
                             conversation_id=point.payload.get('conversation_id'),
-                            collection_name=collection_name
+                            collection_name=collection_name,
+                            field=point.payload.get('field')  # Тип контента
                         ))
-                else:
-                    # Standard search without decay
+            else:
+                # Standard search without decay
                     results = await qdrant_client.search(
                         collection_name=collection_name,
                         query_vector=query_embedding,
                         limit=limit,
                         score_threshold=min_score,
-                        with_payload=True
+                        with_payload=True,
+                        query_filter=search_filter  # Apply project filter
                     )
                     logger.debug(f"Found {len(results)} results in {collection_name} with score >= {min_score}")
                     
@@ -593,18 +534,9 @@ async def reflect_on_past(
                         raw_timestamp = point.payload.get('timestamp', datetime.now(timezone.utc).isoformat())
                         clean_timestamp = raw_timestamp.replace('Z', '+00:00') if raw_timestamp.endswith('Z') else raw_timestamp
                         
-                        # Check project filter if we're searching all collections but want specific project
-                        point_project = point.payload.get('project', collection_name.replace('conv_', '').replace('_local', ''))
+                        # Get project name from payload
+                        point_project = point.payload.get('project_name', 'unknown')
                         
-                        # Handle project matching - check if the target project name appears at the end of the stored project path
-                        if target_project != 'all' and len(collections_to_search) == len(all_collections):
-                            # The stored project name is like "-Users-ramakrishnanannaswamy-projects-ShopifyMCPMockShop"
-                            # We want to match just "ShopifyMCPMockShop"
-                            logger.debug(f"Project filter active: target={target_project}, point_project={point_project}, score={point.score}")
-                            if not point_project.endswith(f"-{target_project}") and point_project != target_project:
-                                logger.debug(f"Skipping result from different project: {point_project}")
-                                continue  # Skip results from other projects
-                            
                         all_results.append(SearchResult(
                             id=str(point.id),
                             score=point.score,
@@ -613,12 +545,13 @@ async def reflect_on_past(
                             excerpt=(point.payload.get('text', '')[:500] + '...'),
                             project_name=point_project,
                             conversation_id=point.payload.get('conversation_id'),
-                            collection_name=collection_name
+                            collection_name=collection_name,
+                            field=point.payload.get('field')  # Тип контента
                         ))
             
-            except Exception as e:
-                logger.debug(f"Error searching {collection_name}: {str(e)}")
-                continue
+        except Exception as e:
+            logger.error(f"Error searching {collection_name}: {str(e)}")
+            return f"Error searching conversations: {str(e)}"
         
         # Sort by score and limit
         all_results.sort(key=lambda x: x.score, reverse=True)
@@ -638,6 +571,8 @@ async def reflect_on_past(
             result_text += f"Time: {datetime.fromisoformat(timestamp_clean).strftime('%Y-%m-%d %H:%M:%S')}\n"
             result_text += f"Project: {result.project_name}\n"
             result_text += f"Role: {result.role}\n"
+            if result.field:
+                result_text += f"Type: {result.field}\n"
             result_text += f"Excerpt: {result.excerpt}\n"
             result_text += "---\n\n"
         
@@ -659,17 +594,16 @@ async def store_reflection(
     try:
         # Determine project scope
         if project is None:
-            target_project = MCP_CLIENT_CWD
+            # Use default project name determined at startup
+            project_name = DEFAULT_PROJECT_NAME
+            logger.info(f"store_reflection: No project specified, using default: {project_name}")
         else:
-            target_project = project
+            # Convert user-provided project to watcher format
+            project_name = project.replace('/', '-') if '/' in project else project
+            logger.info(f"store_reflection: Using specified project: {project_name}")
         
-        logger.debug(f"store_reflection: target_project={target_project}")
-        
-        # Get project hash for collection name
-        project_hash = hashlib.md5(target_project.encode()).hexdigest()[:8]
-        collection_name = f"conv_{project_hash}{get_collection_suffix()}"
-        
-        logger.debug(f"store_reflection: collection_name={collection_name}")
+        # Use claude_logs collection
+        collection_name = 'claude_logs'
         
         # Ensure collection exists
         try:
@@ -683,7 +617,7 @@ async def store_reflection(
                     distance=Distance.COSINE
                 )
             )
-            logger.debug(f"Created reflections collection: {collection_name}")
+            logger.debug(f"Created collection: {collection_name}")
         
         # Generate embedding for the reflection
         embedding = await generate_embedding(content)
@@ -700,8 +634,10 @@ async def store_reflection(
                 "type": "reflection",
                 "role": "user_reflection",
                 "start_role": "user_reflection",  # For compatibility with search
-                "project": target_project,
-                "conversation_id": f"reflection_{int(point_id)}"
+                "project_name": project_name,  # Use consistent field name
+                "conversation_id": f"reflection_{int(point_id)}",
+                "field": "text",  # For compatibility with watcher
+                "source": "reflection"  # To distinguish from watcher imports
             }
         )
         
@@ -712,7 +648,7 @@ async def store_reflection(
         )
         
         tags_str = ', '.join(tags) if tags else 'none'
-        return f"Reflection stored successfully in project '{target_project}' with tags: {tags_str}"
+        return f"Reflection stored successfully in project '{project_name}' with tags: {tags_str}"
         
     except Exception as e:
         await ctx.error(f"Store failed: {str(e)}")

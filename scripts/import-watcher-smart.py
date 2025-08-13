@@ -26,10 +26,15 @@ import queue
 import hashlib
 import logging
 import threading
+import signal
+import atexit
+import gc
+import psutil
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+import threading
 
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import (
@@ -37,7 +42,6 @@ from qdrant_client.http.models import (
     VectorParams,
     HnswConfigDiff,
     PointStruct,
-    PayloadIndexParams,
     PayloadSchemaType,
 )
 from fastembed import TextEmbedding
@@ -53,10 +57,18 @@ QDRANT_URL = os.getenv("QDRANT_URL", "http://qdrant:6333")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY") or None
 
 COLLECTION_NAME = os.getenv("COLLECTION_NAME", "claude_logs")
-VECTOR_SIZE = int(os.getenv("VECTOR_SIZE", "1024"))  # default for multilingual-e5-large
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "intfloat/multilingual-e5-large")  # FastEmbed model
+
+# Required environment variables
+if not os.getenv("VECTOR_SIZE"):
+    raise ValueError("VECTOR_SIZE environment variable must be set")
+if not os.getenv("EMBEDDING_MODEL"):
+    raise ValueError("EMBEDDING_MODEL environment variable must be set")
+
+VECTOR_SIZE = int(os.getenv("VECTOR_SIZE"))  # Must be set via ENV
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL")  # Must be set via ENV
 EMBED_BATCH = int(os.getenv("EMBED_BATCH", "96"))
 NORMALIZE_L2 = os.getenv("NORMALIZE_L2", "true").lower() == "true"
+TRANSFORMERS_CACHE = os.getenv("TRANSFORMERS_CACHE")
 
 # Чанкование
 TEXT_CHARS = int(os.getenv("TEXT_CHARS", "1200"))
@@ -80,6 +92,34 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
 )
 logger = logging.getLogger("watcher")
+
+# Log configuration at startup
+logger.info(f"Initializing FastEmbed model: {EMBEDDING_MODEL}")
+logger.info(f"Vector size: {VECTOR_SIZE}")
+
+# Логируем сигналы завершения и выход процесса
+def _on_sigterm(signum, frame):
+    logger.warning(f"Received signal {signum}, shutting down")
+    # shuting down
+    sys.exit(0)
+
+def _on_sigint(signum, frame):
+    logger.warning(f"Received SIGINT ({signum}), shutting down")
+    # shuting down
+    sys.exit(0)
+
+def _on_exit():
+    logger.warning("Watcher process is exiting (atexit)")
+    # shuting down
+    sys.exit(0)
+
+try:
+    signal.signal(signal.SIGTERM, _on_sigterm)
+    signal.signal(signal.SIGINT, _on_sigint)
+except Exception:
+    # м.б. не поддерживается на платформе — игнорируем
+    pass
+atexit.register(_on_exit)
 
 
 # -----------------------
@@ -215,7 +255,7 @@ class QdrantService:
                     self.client.create_payload_index(
                         collection_name=COLLECTION_NAME,
                         field_name=fld,
-                        field_schema=PayloadIndexParams(t)
+                        field_schema=t
                     )
                 except Exception:
                     pass
@@ -224,7 +264,7 @@ class QdrantService:
                 self.client.create_payload_index(
                     collection_name=COLLECTION_NAME,
                     field_name="timestamp",
-                    field_schema=PayloadIndexParams(PayloadSchemaType.KEYWORD),
+                    field_schema=PayloadSchemaType.KEYWORD,
                 )
             except Exception:
                 pass
@@ -241,17 +281,104 @@ class QdrantService:
 
 class EmbeddingService:
     def __init__(self):
+        # Log cache directories used by HF and FastEmbed before heavy downloads
+        hf_dir = os.getenv("HF_HOME") or os.path.join(str(Path.home()), ".cache", "huggingface")
+        fe_dir = os.path.join(str(Path.home()), ".cache", "fastembed")
+        # Log important envs affecting downloads/cache and networking
+        env_snapshot = {
+            "HF_HOME": os.getenv("HF_HOME"),
+            "TRANSFORMERS_CACHE": os.getenv("TRANSFORMERS_CACHE"),
+            "HUGGINGFACE_HUB_CACHE": os.getenv("HUGGINGFACE_HUB_CACHE"),
+            "HTTP_PROXY": os.getenv("HTTP_PROXY"),
+            "HTTPS_PROXY": os.getenv("HTTPS_PROXY"),
+            "NO_PROXY": os.getenv("NO_PROXY"),
+        }
+        logger.info(f"Env for embedding init: {env_snapshot}")
+        logger.info(
+            f"Embedding caches | HF_HOME={hf_dir} exists={Path(hf_dir).exists()} | "
+            f"FASTEMBED_DIR={fe_dir} exists={Path(fe_dir).exists()}"
+        )
+        # Background monitor: log cache stats while model initializes
+        stop_evt = threading.Event()
+
+        def _dir_stats(path: str, max_depth: int = 2) -> Dict[str, Any]:
+            p = Path(path)
+            if not p.exists():
+                return {"exists": False}
+            root_depth = len(p.parts)
+            files = 0
+            size = 0
+            latest_mtime = 0.0
+            for dirpath, dirnames, filenames in os.walk(path):
+                cur_depth = len(Path(dirpath).parts) - root_depth
+                if cur_depth > max_depth:
+                    # don't descend further
+                    dirnames[:] = []
+                    continue
+                for f in filenames:
+                    fp = os.path.join(dirpath, f)
+                    try:
+                        st = os.stat(fp)
+                        files += 1
+                        size += st.st_size
+                        if st.st_mtime > latest_mtime:
+                            latest_mtime = st.st_mtime
+                    except Exception:
+                        continue
+            return {"exists": True, "files": files, "size": size, "latest_mtime": latest_mtime}
+
+        def _monitor():
+            while not stop_evt.is_set():
+                hf = _dir_stats(hf_dir)
+                fe = _dir_stats(fe_dir)
+                logger.info(
+                    f"Model init progress | HF: exists={hf.get('exists')} files={hf.get('files')} "
+                    f"size={hf.get('size')} latest_mtime={hf.get('latest_mtime')} | "
+                    f"FE: exists={fe.get('exists')} files={fe.get('files')} size={fe.get('size')} "
+                    f"latest_mtime={fe.get('latest_mtime')}"
+                )
+                stop_evt.wait(5.0)
+
+        t_mon = threading.Thread(target=_monitor, name="embed-init-monitor", daemon=True)
+        t_mon.start()
+
         logger.info(f"Initializing FastEmbed model: {EMBEDDING_MODEL}")
-        self.model = TextEmbedding(model_name=EMBEDDING_MODEL)
+        t0 = time.time()
+        try:
+            # Update timestamp file after successful initialization
+            model_cache_path = Path(TRANSFORMERS_CACHE) / EMBEDDING_MODEL.replace('/', '_')
+            self.model = TextEmbedding(
+                model_name=EMBEDDING_MODEL,
+                cache_dir=model_cache_path
+            )
+        finally:
+            stop_evt.set()
+            t_mon.join(timeout=2.0)
+            logger.info(f"TextEmbedding initialized in {time.time() - t0:.2f}s")
+        # Блокировка для последовательных вызовов embed() из разных потоков
+        self._lock = threading.Lock()
 
     def embed_batch(self, texts: List[str]) -> List[List[float]]:
         # FastEmbed возвращает генератор numpy массивов; приведём к python list
         vectors = []
-        for vec in self.model.embed(texts, batch_size=EMBED_BATCH):
-            v = vec.tolist()
-            if NORMALIZE_L2:
-                v = l2_normalize(v)
-            vectors.append(v)
+        # Гарантируем, что инференс не идёт параллельно
+        with self._lock:
+            proc = psutil.Process()
+            try:
+                mem_before = proc.memory_info().rss
+                logger.info(f"embed_batch start | batch_size={EMBED_BATCH} texts={len(texts)} rss={mem_before/1e6:.1f}MB")
+            except Exception:
+                pass
+            for vec in self.model.embed(texts, batch_size=EMBED_BATCH):
+                v = vec.tolist()
+                if NORMALIZE_L2:
+                    v = l2_normalize(v)
+                vectors.append(v)
+            try:
+                mem_after = proc.memory_info().rss
+                logger.info(f"embed_batch end   | produced={len(vectors)} rss={mem_after/1e6:.1f}MB (+{(mem_after-mem_before)/1e6:.1f}MB)")
+            except Exception:
+                pass
         return vectors
 
 
@@ -327,13 +454,14 @@ def build_points_from_log_lines(
     lines: List[str],
     project_name: str,
     file_path: str,
-) -> Tuple[List[PointStruct], int]:
+) -> Tuple[List[Dict[str, Any]], int]:
     """
     Превращает список JSONL строк в список PointStruct для Qdrant.
     Не хранит историю удаления; full-check/удаление оставлено как есть.
     Возвращает (points, messages_count).
     """
-    points: List[PointStruct] = []
+    # Собираем «pending» точки: без vector, только id/payload и временное поле _text
+    points: List[Dict[str, Any]] = []
 
     # Текущий «текстовый» чанк диалога
     cur_role = None  # роль первого сообщения в чанке
@@ -372,9 +500,9 @@ def build_points_from_log_lines(
                 "source": "message",
                 "model": "",  # при необходимости заполнить из последнего msg
             }
-            points.append(PointStruct(id=pid, vector=None, payload=payload))  # vector заполним позже
-            # Временный текст кладём в payload для эмбеддинга позже
-            payload["_text"] = part
+            # Кладём во временный список; vector добавим позже, перед upsert
+            payload["text"] = part
+            points.append({"id": pid, "payload": payload})
             text_chunks_total += 1
 
         # reset
@@ -456,8 +584,8 @@ def build_points_from_log_lines(
                             "source": "message",
                             "model": model,
                         }
-                        points.append(PointStruct(id=pid, vector=None, payload=payload))
-                        payload["_text"] = block  # для эмбеддинга
+                        payload["text"] = block  # для эмбеддинга
+                        points.append({"id": pid, "payload": payload})
 
         # Если смена роли с assistant → user, то закрываем текущий текстовый чанк
         if cur_role == "assistant" and role == "user":
@@ -482,8 +610,8 @@ def build_points_from_log_lines(
                         "source": "toolUseResult",
                         "model": model,
                     }
-                    points.append(PointStruct(id=pid, vector=None, payload=payload))
-                    payload["_text"] = block
+                    payload["text"] = block
+                    points.append({"id": pid, "payload": payload})
 
             stderr = tur.get("stderr")
             if stderr:
@@ -500,8 +628,8 @@ def build_points_from_log_lines(
                         "source": "toolUseResult",
                         "model": model,
                     }
-                    points.append(PointStruct(id=pid, vector=None, payload=payload))
-                    payload["_text"] = block
+                    payload["text"] = block
+                    points.append({"id": pid, "payload": payload})
 
             # code-like поля
             for name, kind, linesz, over in [
@@ -526,8 +654,8 @@ def build_points_from_log_lines(
                             "model": model,
                             "src": name,
                         }
-                        points.append(PointStruct(id=pid, vector=None, payload=payload))
-                        payload["_text"] = block
+                        payload["text"] = block
+                        points.append({"id": pid, "payload": payload})
 
         # можно расширить: toolUseResult.file.content и т.п.
 
@@ -587,15 +715,15 @@ class Watcher:
                 cur += 1
         return res, cur  # cur = total_lines
 
-    def _embed_and_upsert(self, points: List[PointStruct]):
+    def _embed_and_upsert(self, points: List[Dict[str, Any]]):
         if not points:
             return
         # Собираем тексты для эмбеддинга
         texts = []
         order = []
         for idx, p in enumerate(points):
-            payload = p.payload or {}
-            txt = payload.pop("_text", None)
+            payload = p.get("payload") or {}
+            txt = payload.get("text", None)  # Используем поле text для эмбеддинга и сохранения
             if not isinstance(txt, str):
                 # если нет текста (не должно быть), пропускаем point
                 continue
@@ -603,18 +731,36 @@ class Watcher:
             order.append(idx)
         if not texts:
             return
-
-        vectors = self.embed.embed_batch(texts)
+        t0 = time.time()
+        logger.info(f"Embedding {len(texts)} chunks")
+        try:
+            vectors = self.embed.embed_batch(texts)
+        except BaseException as e:
+            logger.exception(f"FATAL during embed_batch for {len(texts)} chunks: {e}")
+            return
+        emb_dur = time.time() - t0
+        logger.info(f"Embedding done in {emb_dur:.2f}s")
         # Раскладываем обратно по points
+        final_points: List[PointStruct] = []
         for i, idx in enumerate(order):
             vec = vectors[i]
-            # Создаём новый PointStruct с вектором и payload
-            payload = points[idx].payload
-            pid = points[idx].id
-            points[idx] = PointStruct(id=pid, vector=vec, payload=payload)
+            item = points[idx]
+            payload = item.get("payload") or {}
+            pid = item.get("id")
+            final_points.append(PointStruct(id=pid, vector=vec, payload=payload))
 
         # Upsert
-        self.qdrant.upsert_points(points)
+        t1 = time.time()
+        logger.info(f"Upserting {len(order)} points to Qdrant")
+        self.qdrant.upsert_points(final_points)
+        up_dur = time.time() - t1
+        logger.info(f"Upsert done in {up_dur:.2f}s")
+        # Постараемся быстрее освободить память
+        try:
+            del final_points
+        except Exception:
+            pass
+        gc.collect()
 
     def process_file(self, file_path: str, st: os.stat_result):
         fi = self.state.files.get(file_path)
@@ -623,6 +769,7 @@ class Watcher:
             self.state.files[file_path] = fi
 
         start_line = fi.start_line or 0
+        t_start = time.time()
         lines, total_lines = self._read_lines_from(file_path, start_line)
         if not lines:
             # обновим метаданные и выйдем
@@ -630,6 +777,9 @@ class Watcher:
             fi.size = st.st_size
             fi.last_processed_at = time.time()
             return
+        logger.info(
+            f"Processing {file_path} | start_line={start_line} size={st.st_size} mtime={st.st_mtime}"
+        )
 
         project_name = self._project_of(file_path)
         points, msgs_count = build_points_from_log_lines(lines, project_name, file_path)
@@ -642,12 +792,18 @@ class Watcher:
         fi.last_processed_at = time.time()
         fi.chunks_count += len(points)
         fi.lines_processed += len(lines)
+        dur = time.time() - t_start
+        logger.info(
+            f"Processed {file_path} | +lines={len(lines)} msgs={msgs_count} points={len(points)} total_lines={total_lines} took={dur:.2f}s"
+        )
 
     def run_once(self):
         files = self._scan_files()
         if not files:
-            logger.info("No files found")
+            logger.info(f"No files found in {LOGS_DIR}")
             return
+        t_start = time.time()
+        logger.info(f"Found {len(files)} files in {LOGS_DIR}")
         # обрабатываем в несколько потоков
         with ThreadPoolExecutor(max_workers=MAX_PARALLEL_FILES) as ex:
             futs = []
@@ -665,6 +821,9 @@ class Watcher:
         except Exception as e:
             logger.error(f"Failed to save state: {e}")
 
+        dur = time.time() - t_start
+        logger.info(f"Processed {len(files)} files in {dur:.2f}s")
+
     def run(self):
         logger.info(
             f"Start watcher | LOGS_DIR={LOGS_DIR} QDRANT_URL={QDRANT_URL} "
@@ -675,6 +834,7 @@ class Watcher:
                 self.run_once()
             except Exception as e:
                 logger.exception(f"run_once error: {e}")
+            logger.info(f"Sleeping for {IMPORT_INTERVAL} seconds")
             time.sleep(IMPORT_INTERVAL)
 
 
@@ -683,8 +843,16 @@ class Watcher:
 # -----------------------
 
 def main():
-    w = Watcher()
-    w.run()
+    logger.info("Watcher main() start")
+    try:
+        w = Watcher()
+        w.run()
+    except BaseException as e:
+        logger.exception(f"Watcher terminated by BaseException: {e}")
+        # Не подавляем — позволяем процессу завершиться, чтобы политика рестартов Docker сработала
+        raise
+    finally:
+        logger.warning("Watcher main() exiting")
 
 
 if __name__ == "__main__":
