@@ -12,10 +12,10 @@ def main():
         default="stdio",
     )
     args = parser.parse_args()
-    
+
     # Import is done here to make sure environment variables are loaded
     from .server import mcp
-    
+
     # Run the server with the specified transport
     # Disable FastMCP banner to prevent JSON output interference
     mcp.run(transport=args.transport, show_banner=False)

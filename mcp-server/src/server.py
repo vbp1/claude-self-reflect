@@ -255,10 +255,10 @@ def build_native_decay_query(_: list) -> FormulaQuery:
       final_score = $score + DECAY_WEIGHT * exp_decay(timestamp → now, scale)
     """
     from datetime import datetime, timezone
-    
+
     # Получаем текущее время в ISO-8601 формате
     current_time = datetime.now(timezone.utc).isoformat()
-    
+
     decay = ExpDecayExpression(
         exp_decay=DecayParamsExpression(
             x=DatetimeKeyExpression(datetime_key="timestamp"),   # поле с датой в payload
@@ -361,7 +361,7 @@ def convert_point_to_search_result(
 
     # Получаем score - может быть в point.score (native) или в payload (client-side decay)
     score = point.score if hasattr(point, 'score') and point.score is not None else point.payload.get("score")
-    
+
     # Возвращаем только если не ниже порога
     if score is None or score < min_score:
         return None
@@ -475,7 +475,7 @@ async def perform_qdrant_search(
 
         # Шаг финальный: Обрабатываем результаты от Qdrant
         logger.info(f"Processing {len(results)} results from Qdrant")
-            
+
         # Шаг 2.2: Добавляем только если score выше порога
         for i, point in enumerate(results):
             logger.debug(f"Processing point {i+1}/{len(results)}: id={point.id}")
@@ -516,11 +516,11 @@ async def perform_qdrant_search(
 def resolve_project_name(project: Optional[str], context: str = "") -> str:
     """
     Resolve project name from user input to internal format.
-    
+
     Args:
         project: User-provided project name or None for default, "all" for all projects.
         context: Context string for logging (e.g., "reflect_on_past", "store_reflection").
-    
+
     Returns:
         Resolved project name for internal use.
     """
@@ -538,7 +538,7 @@ def resolve_project_name(project: Optional[str], context: str = "") -> str:
         project_name = project.replace("/", "-") if "/" in project else project
         if context:
             logger.info(f"{context}: Using specified project: {project_name}")
-    
+
     return project_name
 
 
@@ -549,15 +549,15 @@ def build_search_filter(
 ) -> Optional[dict]:
     """
     Build a Qdrant search filter based on provided criteria.
-    
+
     Args:
         project_name: Project name to filter by. Use "all" to skip project filtering.
         tags: List of tags to filter by (AND condition - must have ALL tags).
         additional_conditions: Additional filter conditions to include.
-    
+
     Returns:
         Qdrant filter dict or None if no filters needed.
-    
+
     Example:
         >>> build_search_filter(project_name="my-project", tags=["bug", "feature"])
         {'must': [{'key': 'project_name', 'match': {'value': 'my-project'}},
@@ -565,30 +565,30 @@ def build_search_filter(
                   {'key': 'tags', 'match': {'value': 'feature'}}]}
     """
     must_conditions = []
-    
+
     # Add project filter if not searching all projects
     if project_name and project_name != "all":
         logger.debug(f"build_search_filter: Adding project filter for '{project_name}'")
         must_conditions.append({"key": "project_name", "match": {"value": project_name}})
-    
+
     # Add tags filter if tags are specified (AND condition - must have ALL tags)
     if tags:
         logger.debug(f"build_search_filter: Adding tags filter for {tags} (AND condition)")
         # Each tag gets its own condition to ensure ALL tags must be present
         for tag in tags:
             must_conditions.append({"key": "tags", "match": {"value": tag}})
-    
+
     # Add any additional conditions
     if additional_conditions:
         logger.debug(f"build_search_filter: Adding {len(additional_conditions)} additional conditions")
         must_conditions.extend(additional_conditions)
-    
+
     # Build the final filter if we have any conditions
     if must_conditions:
         search_filter = {"must": must_conditions}
         logger.debug(f"build_search_filter: Final filter with {len(must_conditions)} conditions")
         return search_filter
-    
+
     logger.debug("build_search_filter: No filters applied")
     return None
 
@@ -625,7 +625,7 @@ async def reflect_on_past(
     logger.debug(f"  use_decay: {use_decay}")
     logger.debug(f"  project: {project}")
     logger.debug(f"  tags: {tags} (type: {type(tags)})")
-    
+
     # Parse tags if they come as a string
     if tags is not None:
         if isinstance(tags, str):
@@ -670,7 +670,7 @@ async def reflect_on_past(
             project_name=project_name,
             tags=tags
         )
-        
+
         if search_filter:
             logger.info(f"reflect_on_past: Using filter with {len(search_filter.get('must', []))} conditions")
             logger.info(f"reflect_on_past: Full filter: {search_filter}")
@@ -774,7 +774,7 @@ async def store_reflection(
                 "project_name": project_name,  # Use consistent field name
                 "conversation_id": f"reflection_{int(point_id)}",
                 "field": "text",
-                "source": "reflection", 
+                "source": "reflection",
             },
         )
 
