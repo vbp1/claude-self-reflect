@@ -15,7 +15,6 @@ Claude Self-Reflect is a semantic memory system that gives Claude persistent con
 - **Memory Decay**: Time-based relevance scoring (90-day half-life) prevents information overload
 - **Local-First Architecture**: All embeddings generated locally, no external API calls
 - **MCP Integration**: Native Claude Code integration via Model Context Protocol
-- **Real-Time Updates**: Automatic conversation import with file watcher (optional)
 
 ### Why It Matters
 
@@ -106,9 +105,6 @@ mcp-server/
 
 | Model | Dimensions | Languages | Use Case |
 |-------|------------|-----------|----------|
-| `intfloat/multilingual-e5-small` | 384 | 100+ | Default, balanced performance |
-| `intfloat/multilingual-e5-large` | 1024 | 100+ | Higher accuracy, more resources |
-| `sentence-transformers/all-MiniLM-L6-v2` | 384 | English | Fast, English-only projects |
 | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` | 384 | 50+ | Multilingual with good performance |
 
 All models run 100% locally with automatic caching for offline use.
@@ -144,7 +140,7 @@ All models run 100% locally with automatic caching for offline use.
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/yourusername/claude-self-reflect.git
+git clone https://github.com/vbp1/claude-self-reflect.git
 cd claude-self-reflect
 
 # 2. Create environment file
@@ -188,22 +184,6 @@ MODEL_CACHE_DAYS=7                   # Days before model refresh
 # Logging
 LOG_LEVEL=INFO                       # DEBUG, INFO, WARNING, ERROR
 LOG_FILE=/logs/mcp-server.log        # Optional log file path
-```
-
-#### Docker Compose Profiles
-
-```bash
-# Start only core services (Qdrant)
-docker compose up -d
-
-# Start with MCP server
-docker compose --profile mcp up -d
-
-# Start with import watcher (auto-import)
-docker compose --profile watcher up -d
-
-# Start everything
-docker compose --profile mcp --profile watcher up -d
 ```
 
 ## Connecting to Claude Code
@@ -261,6 +241,15 @@ mcp__claude-self-reflect__store_reflection(
 - `tags`: List of tags for categorization (default: [])
 - `project`: Target project (default: current working directory)
 
+### Smart Model Caching
+
+The containerized MCP server includes intelligent model caching:
+
+- **First run**: Downloads model from Hugging Face (slow)
+- **Subsequent runs**: Uses cached model in offline mode (fast startup)
+- **Auto-refresh**: Checks for model updates after 7 days (configurable)
+- **Environment variable**: Set `MODEL_CACHE_DAYS=30` for custom refresh interval
+
 ### Usage Prompt for Claude
 
 Add this to your project's CLAUDE.md or global Claude instructions:
@@ -282,49 +271,12 @@ You have access to semantic memory tools via MCP. Use them proactively:
 - After discovering useful patterns or techniques
 - When the user explicitly asks to remember something
 
-### Example Usage
-
-User: "What was that database indexing strategy we discussed?"
-You: *Use mcp__claude-self-reflect__reflect_on_past to search*
-
-User: "Remember this solution for next time"
-You: *Use mcp__claude-self-reflect__store_reflection to save it*
-```
-
-## What You Get
-
-Ask Claude about past conversations. Get actual answers. **100% local by default** - your conversations never leave your machine. Cloud-enhanced search available when you need it.
-
-**Before**: "I don't have access to previous conversations"  
-**After**: 
-```
-⏺ reflection-specialist(Search FastEmbed vs cloud embedding decision)
-  ⎿ Done (3 tool uses · 8.2k tokens · 12.4s)
-
-"Found it! Yesterday we decided on FastEmbed for local mode - better privacy, 
-no API calls, 384-dimensional embeddings. Works offline too."
-```
-
-The reflection specialist is a specialized sub-agent that Claude automatically spawns when you ask about past conversations. It searches your conversation history in its own isolated context, keeping your main chat clean and focused.
-
-Your conversations become searchable. Your decisions stay remembered. Your context persists.
-
-## The Secret Sauce: Sub-Agents
-
-Here's what makes this magical: **The Reflection Specialist sub-agent**.
-
-When you ask about past conversations, Claude doesn't search in your main chat. Instead, it spawns a specialized sub-agent that:
-- Searches your conversation history in its own context
-- Brings back only the relevant results
-- Keeps your main conversation clean and focused
-
 ## Project-Scoped Search
 
 Conversations are **project-aware by default**. When you ask about past conversations, Claude automatically searches within your current project directory, keeping results focused and relevant.
 
 ### How It Works
 
-```
 # Example: Working in ~/projects/ShopifyMCPMockShop
 You: "What authentication method did we implement?"
 Claude: [Searches ONLY ShopifyMCPMockShop conversations]
@@ -338,7 +290,6 @@ Claude: [Searches across ALL your projects]
 # To search a specific project
 You: "Find Docker setup in claude-self-reflect project"
 Claude: [Searches only claude-self-reflect conversations]
-```
 
 ## Memory Decay
 
@@ -349,22 +300,6 @@ Recent conversations matter more. Old ones fade. Like your brain, but reliable.
 **"Just use grep"** - Sure, enjoy your 10,000 matches for "database"  
 **"Overengineered"** - Two functions: store_reflection, reflect_on_past  
 **"Another vector DB"** - Yes, because semantic > string matching
-
-Built by developers tired of re-explaining context every conversation.
-
-## Requirements
-
-- **Docker Desktop** (macOS/Windows) or **Docker Engine** (Linux)
-- **Claude Code** app
-
-### Smart Model Caching
-
-The containerized MCP server includes intelligent model caching:
-
-- **First run**: Downloads model from Hugging Face (slow)
-- **Subsequent runs**: Uses cached model in offline mode (fast startup)
-- **Auto-refresh**: Checks for model updates after 7 days (configurable)
-- **Environment variable**: Set `MODEL_CACHE_DAYS=30` for custom refresh interval
 
 ---
 

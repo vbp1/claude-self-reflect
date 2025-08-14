@@ -596,14 +596,14 @@ async def reflect_on_past(
     ),
     project: Optional[str] = Field(
         default=None,
-        description="Search specific project only. If not provided, searches current project based on working directory. Use 'all' to search across all projects.",
+        description="Optional. Omit to search current project (auto-detected). For specific project use path with dashes instead of slashes (e.g., '-home-user-project'). Use 'all' to search all projects.",
     ),
     tags: Optional[Union[List[str], str]] = Field(
         default=None,
         description="Optional tags to filter results. Only results with ALL specified tags will be returned. Can be a list of strings or comma-separated string. If not specified, all results are returned regardless of tags.",
     ),
 ) -> str:
-    """Search for relevant past conversations using semantic search with optional time decay and tag filtering."""
+    """Search through previously stored project information, insights, and reflections using semantic search. Supports optional time-based relevance decay and tag filtering for precise retrieval."""
 
     # Log all incoming parameters
     logger.debug("reflect_on_past called with parameters:")
@@ -707,14 +707,14 @@ async def reflect_on_past(
 @mcp.tool()
 async def store_reflection(
     ctx: Context,
-    content: str = Field(description="The insight or reflection to store"),
-    tags: List[str] = Field(default=[], description="Tags to categorize this reflection"),
+    content: str = Field(description="The information, insight or reflection to store"),
+    tags: List[str] = Field(default=[], description="Tags to categorize this information, insight or reflection"),
     project: Optional[str] = Field(
         default=None,
-        description="Target project for the reflection. If not provided, uses current project.",
+        description="Target project for the stored information, insight or reflection. If not provided, uses current project.",
     ),
 ) -> str:
-    """Store an important insight or reflection for future reference."""
+    """Store an important information about this project, insight or reflection that can be useful for future tasks to a memory"""
 
     try:
         # Determine project scope
