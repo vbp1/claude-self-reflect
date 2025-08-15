@@ -65,6 +65,7 @@ DECAY_WEIGHT = float(os.getenv("DECAY_WEIGHT", "0.3"))
 DECAY_SCALE_DAYS = float(os.getenv("DECAY_SCALE_DAYS", "90"))
 USE_NATIVE_DECAY = os.getenv("USE_NATIVE_DECAY", "true").lower() == "true"
 MCP_CLIENT_CWD = os.getenv("MCP_CLIENT_CWD", os.getcwd())
+PROJECT_ID = os.getenv("PROJECT_ID", "").strip()
 
 # Embedding configuration
 # Required environment variables
@@ -81,11 +82,15 @@ CACHE_DIR = os.getenv("TRANSFORMERS_CACHE", "/home/mcpuser/.cache/huggingface")
 MODEL_CACHE_DAYS = int(os.getenv("MODEL_CACHE_DAYS", "7"))
 
 # Determine project name that will be used for all searches
-# Convert MCP_CLIENT_CWD to watcher format: /path/to/project -> -path-to-project
-if not MCP_CLIENT_CWD:
-    raise ValueError("MCP_CLIENT_CWD is not set - cannot determine project")
-# Convert slashes to dashes for project name (keeping backward compatibility)
-DEFAULT_PROJECT_NAME = re.sub(r"[\\/]+", "-", MCP_CLIENT_CWD)
+# Priority: PROJECT_ID (explicit) -> MCP_CLIENT_CWD-derived (backward compatibility)
+if PROJECT_ID:
+    DEFAULT_PROJECT_NAME = PROJECT_ID
+else:
+    # Convert MCP_CLIENT_CWD to watcher format: /path/to/project -> -path-to-project
+    if not MCP_CLIENT_CWD:
+        raise ValueError("Neither PROJECT_ID nor MCP_CLIENT_CWD is set - cannot determine project")
+    # Convert slashes to dashes for project name (keeping backward compatibility)
+    DEFAULT_PROJECT_NAME = re.sub(r"[\\/]+", "-", MCP_CLIENT_CWD)
 
 # Main collection for all conversations
 MAIN_COLLECTION = "claude_logs"
@@ -178,6 +183,7 @@ logger.info(f"DECAY_WEIGHT: {DECAY_WEIGHT}")
 logger.info(f"DECAY_SCALE_DAYS: {DECAY_SCALE_DAYS}")
 logger.info(f"TRANSFORMERS_CACHE: {CACHE_DIR}")
 logger.info(f"MODEL_CACHE_DAYS: {MODEL_CACHE_DAYS}")
+logger.info(f"PROJECT_ID: {PROJECT_ID if PROJECT_ID else '(not set)'}")
 logger.info(f"MCP_CLIENT_CWD: {MCP_CLIENT_CWD}")
 logger.info(f"Default project name for searches: {DEFAULT_PROJECT_NAME}")
 

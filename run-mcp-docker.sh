@@ -40,7 +40,16 @@ while [[ ${#} -gt 0 ]]; do
   esac
 done
 
-# Ensure MCP_CLIENT_CWD is always available inside the container for project scoping logic
+# Determine whether PROJECT_ID was explicitly provided; if so, do NOT force MCP_CLIENT_CWD
+HAS_PROJECT_ID=false
+for kv in "${ENV_LIST[@]:-}"; do
+  if [[ "$kv" == PROJECT_ID* || "$kv" == "PROJECT_ID" ]]; then
+    HAS_PROJECT_ID=true
+    break
+  fi
+done
+
+# Ensure MCP_CLIENT_CWD is available only if PROJECT_ID is not provided
 HAS_MCP_CWD=false
 for kv in "${ENV_LIST[@]:-}"; do
   if [[ "$kv" == MCP_CLIENT_CWD* || "$kv" == "MCP_CLIENT_CWD" ]]; then
@@ -48,12 +57,17 @@ for kv in "${ENV_LIST[@]:-}"; do
     break
   fi
 done
-if [[ "$HAS_MCP_CWD" == false ]]; then
-  if root=$(git -C "$(pwd)" rev-parse --show-toplevel 2>/dev/null); then
-    ENV_LIST+=("MCP_CLIENT_CWD=$root")
-  else
-    ENV_LIST+=("MCP_CLIENT_CWD=$(pwd)")
+if [[ "$HAS_PROJECT_ID" == true ]]; then
+  echo "[run-mcp-docker] PROJECT_ID provided; not setting MCP_CLIENT_CWD" 1>&2
+else
+  if [[ "$HAS_MCP_CWD" == false ]]; then
+    if root=$(git -C "$(pwd)" rev-parse --show-toplevel 2>/dev/null); then
+      ENV_LIST+=("MCP_CLIENT_CWD=$root")
+    else
+      ENV_LIST+=("MCP_CLIENT_CWD=$(pwd)")
+    fi
   fi
+  echo "[run-mcp-docker] PROJECT_ID not set; using MCP_CLIENT_CWD=$(printf '%q' "${ENV_LIST[-1]#MCP_CLIENT_CWD=}")" 1>&2
 fi
 
 # Get the directory of this script
@@ -69,7 +83,7 @@ for i in {1..30}; do
         echo "MCP server container is ready" >&2
         break
     fi
-    if [ $i -eq 30 ]; then
+    if [ "$i" -eq 30 ]; then
         echo "Timeout waiting for MCP server container to be ready" >&2
         exit 1
     fi

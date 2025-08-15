@@ -37,7 +37,16 @@ while [[ ${#} -gt 0 ]]; do
   esac
 done
 
-# Ensure MCP_CLIENT_CWD is set unless user passed it explicitly
+# Determine whether PROJECT_ID was explicitly provided; if so, do NOT force MCP_CLIENT_CWD
+HAS_PROJECT_ID=false
+for kv in "${ENV_LIST[@]:-}"; do
+  if [[ "$kv" == PROJECT_ID* || "$kv" == "PROJECT_ID" ]]; then
+    HAS_PROJECT_ID=true
+    break
+  fi
+done
+
+# Ensure MCP_CLIENT_CWD is set unless user passed it explicitly and PROJECT_ID is not set
 HAS_MCP_CWD=false
 for kv in "${ENV_LIST[@]:-}"; do
   if [[ "$kv" == MCP_CLIENT_CWD* || "$kv" == "MCP_CLIENT_CWD" ]]; then
@@ -45,26 +54,33 @@ for kv in "${ENV_LIST[@]:-}"; do
     break
   fi
 done
-if [[ "$HAS_MCP_CWD" == false ]]; then
-  if root=$(git -C "$(pwd)" rev-parse --show-toplevel 2>/dev/null); then
-    ENV_LIST+=("MCP_CLIENT_CWD=$root")
-  else
-    ENV_LIST+=("MCP_CLIENT_CWD=$(pwd)")
+if [[ "$HAS_PROJECT_ID" == true ]]; then
+  echo "[run-mcp] PROJECT_ID provided; not setting MCP_CLIENT_CWD" 1>&2
+else
+  if [[ "$HAS_MCP_CWD" == false ]]; then
+    if root=$(git -C "$(pwd)" rev-parse --show-toplevel 2>/dev/null); then
+      ENV_LIST+=("MCP_CLIENT_CWD=$root")
+    else
+      ENV_LIST+=("MCP_CLIENT_CWD=$(pwd)")
+    fi
   fi
+  echo "[run-mcp] PROJECT_ID not set; using MCP_CLIENT_CWD=$(printf '%q' "${ENV_LIST[-1]#MCP_CLIENT_CWD=}")" 1>&2
 fi
 
 # Export all collected envs
 for kv in "${ENV_LIST[@]:-}"; do
   if [[ "$kv" == *"="* ]]; then
-    export "$kv"
+    export "${kv?}"
   else
     # Export existing variable as-is (may be empty if not set by caller)
-    export "$kv"
+    export "${kv?}"
   fi
 done
 
-# Export current working directory
-export MCP_CLIENT_CWD=${MCP_CLIENT_CWD:-$(pwd)}
+# Export current working directory only if PROJECT_ID is not set
+if [[ -z "${PROJECT_ID:-}" ]]; then
+  export MCP_CLIENT_CWD=${MCP_CLIENT_CWD:-$(pwd)}
+fi
 
 # Get the directory of this script
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
@@ -76,10 +92,19 @@ cd "$SCRIPT_DIR"
 if [ ! -d "venv" ]; then
     echo "Creating virtual environment..."
     python3 -m venv venv
+    # shellcheck disable=SC1091
     source venv/bin/activate
     pip install -e .
 else
+    # shellcheck disable=SC1091
     source venv/bin/activate
+fi
+
+# Log selected project identifier for visibility
+if [[ -n "${PROJECT_ID:-}" ]]; then
+  echo "[run-mcp] Starting with PROJECT_ID='${PROJECT_ID}'" 1>&2
+else
+  echo "[run-mcp] Starting with MCP_CLIENT_CWD='${MCP_CLIENT_CWD}'" 1>&2
 fi
 
 # Run the MCP server
