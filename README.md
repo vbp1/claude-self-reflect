@@ -68,7 +68,9 @@ LOG_LEVEL=INFO
 ## Add MCP server (local alternative)
 If you prefer not to use Docker, the local script creates a venv and runs the server:
 ```bash
-./mcp-server/run-mcp.sh -e QDRANT_URL="http://localhost:6333" -e PROJECT_ID="my-project-id"
+claude mcp add claude-self-reflect "$(claude-self-reflect-path)/mcp-server/run-mcp.sh" \
+  -e QDRANT_URL="http://localhost:6333" \
+  -e PROJECT_ID="my-project-id"
 ```
 
 ## MCP tools
