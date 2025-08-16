@@ -1,7 +1,6 @@
 volumes:
   qdrant_data:
-  watcher_state:
-  huggingface_cache:
+  mcp_model_cache:
 
 services:
   # Qdrant vector database - the heart of semantic search
@@ -19,42 +18,6 @@ services:
     mem_limit: ${QDRANT_MEMORY:-1g}
     memswap_limit: ${QDRANT_MEMORY:-1g}
 
-  # Continuous watcher service (optional)
-  watcher:
-    build:
-      context: .
-      dockerfile: Dockerfile.watcher
-    container_name: claude-reflection-watcher
-    depends_on:
-      - qdrant
-    volumes:
-      - ${CLAUDE_LOGS_PATH:-~/.claude/projects}:/logs:ro
-      - ./scripts:/scripts:ro
-      - watcher_state:/app/state
-    environment:
-      - QDRANT_URL=http://qdrant:6333
-      - LOGS_DIR=/logs
-      - STATE_FILE=/app/state/watcher-state.json
-      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
-      # Main settings
-      - IMPORT_INTERVAL=${IMPORT_INTERVAL:-${WATCH_INTERVAL:-60}}
-      - BATCH_SIZE=${BATCH_SIZE:-100}
-      - CHUNK_SIZE=${CHUNK_SIZE:-10}
-      # Behavior settings
-      - FORCE_FULL_CHECK_INTERVAL=${FORCE_FULL_CHECK_INTERVAL:-3600}
-      - QUICK_CHECK_ONLY=${QUICK_CHECK_ONLY:-false}
-      # Performance settings
-      - MAX_PARALLEL_HASHES=${MAX_PARALLEL_HASHES:-5}
-      # Logging settings
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - LOG_STATS_EVERY=${LOG_STATS_EVERY:-10}
-      - VERBOSE_CHECKS=${VERBOSE_CHECKS:-false}
-      - PYTHONUNBUFFERED=1
-    restart: unless-stopped
-    profiles: ["watch"]
-    mem_limit: 2g
-    memswap_limit: 2g
-
   # MCP server for Claude integration
   mcp-server:
     build:
@@ -64,20 +27,21 @@ services:
     depends_on:
       - qdrant
     volumes:
-      - huggingface_cache:/home/mcpuser/.cache/huggingface
+      - mcp_model_cache:/home/mcpuser/.cache/huggingface
+      - ./mcp-server/src:/app/src:ro
     environment:
       - QDRANT_URL=http://qdrant:6333
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2}
+      - VECTOR_SIZE=${VECTOR_SIZE:-384}
       - ENABLE_MEMORY_DECAY=${ENABLE_MEMORY_DECAY:-true}
       - DECAY_WEIGHT=${DECAY_WEIGHT:-0.3}
       - DECAY_SCALE_DAYS=${DECAY_SCALE_DAYS:-90}
       - PYTHONUNBUFFERED=1
       - TRANSFORMERS_CACHE=/home/mcpuser/.cache/huggingface
-      - HF_HOME=/home/mcpuser/.cache/huggingface
       - MODEL_CACHE_DAYS=${MODEL_CACHE_DAYS:-7}
     restart: unless-stopped
     stdin_open: true
     tty: false
-    profiles: ["mcp"]
 
 networks:
   default:

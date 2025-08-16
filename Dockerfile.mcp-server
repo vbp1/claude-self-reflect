@@ -1,22 +1,53 @@
 FROM python:3.11-slim
 
+# Set build arguments for version and metadata
+ARG BUILD_DATE
+ARG VCS_REF
+ARG VERSION=0.2.0
+
+# Add labels for container metadata
+LABEL org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.title="Claude Self-Reflect MCP Server" \
+      org.opencontainers.image.description="MCP server for Claude self-reflection with semantic search and memory decay" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.licenses="MIT"
+
+# Set working directory
 WORKDIR /app
+
+# Install system dependencies if needed for embeddings
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy the MCP server package files
 COPY mcp-server/pyproject.toml ./
+COPY mcp-server/README.md ./
 COPY mcp-server/src ./src
 
-# Install the package in development mode
-RUN pip install --no-cache-dir -e .
+# Upgrade pip and install the package in production mode
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir -e .
 
-# Create a non-root user
-RUN useradd -m -u 1000 mcpuser
+# Create a non-root user with specific UID for consistency
+RUN useradd -m -u 1000 -s /bin/bash mcpuser && \
+    usermod -aG users mcpuser
 
-# Create cache directory with proper permissions
-RUN mkdir -p /home/mcpuser/.cache/huggingface && \
-    chown -R mcpuser:mcpuser /home/mcpuser/.cache
+# Create necessary directories with proper permissions
+RUN mkdir -p /home/mcpuser/.cache/huggingface \
+    && chown -R mcpuser:mcpuser /home/mcpuser/.cache
 
+# Set environment variables for model caching
+ENV TRANSFORMERS_CACHE=/home/mcpuser/.cache/huggingface \
+    HF_HOME=/home/mcpuser/.cache/huggingface \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# Switch to non-root user
 USER mcpuser
 
 # Keep the container running and wait for docker exec commands
+# This allows the MCP server to be invoked via docker exec
 CMD ["tail", "-f", "/dev/null"]

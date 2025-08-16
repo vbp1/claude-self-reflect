@@ -2,95 +2,126 @@
 
 Claude forgets everything. This fixes that.
 
-**Based on https://github.com/ramakay/claude-self-reflect**
+## Overview
 
-## What You Get
+Claude Self-Reflect gives Claude persistent, project-scoped memory via local embeddings and Qdrant search. It integrates with Claude Code through MCP (Model Context Protocol).
 
-Ask Claude about past conversations. Get actual answers. **100% local by default** - your conversations never leave your machine. Cloud-enhanced search available when you need it.
+Core features:
+- Semantic search over past conversations and reflections
+- Project-aware memory (PROJECT_ID preferred; working directory as fallback)
+- Optional time-based relevance decay
+- 100% local embeddings (no external API calls)
 
-**Before**: "I don't have access to previous conversations"  
-**After**: 
-```
-⏺ reflection-specialist(Search FastEmbed vs cloud embedding decision)
-  ⎿ Done (3 tool uses · 8.2k tokens · 12.4s)
+## Components
+- MCP server (Python, FastMCP) in mcp-server/
+- Qdrant vector database
 
-"Found it! Yesterday we decided on FastEmbed for local mode - better privacy, 
-no API calls, 384-dimensional embeddings. Works offline too."
-```
+## Requirements
+- Docker and Docker Compose (recommended), or Python 3.11+
+- Claude Code (latest)
+- 4GB+ RAM recommended for embeddings
 
-The reflection specialist is a specialized sub-agent that Claude automatically spawns when you ask about past conversations. It searches your conversation history in its own isolated context, keeping your main chat clean and focused.
+## Quick Start (Docker)
+```bash
+# 1) Clone
+git clone https://github.com/vbp1/claude-self-reflect.git
+cd claude-self-reflect
 
-Your conversations become searchable. Your decisions stay remembered. Your context persists.
+# 2) Start services
+docker compose up -d
 
-## The Magic
-
-![Self Reflection vs The Grind](docs/images/red-reflection.webp)
-
-## Before & After
-
-![Before and After Claude Self-Reflect](docs/diagrams/before-after-combined.webp)
-
-## Real Examples That Made Us Build This
-
-```
-You: "What was that PostgreSQL optimization we figured out?"
-Claude: "Found it - conversation from Dec 15th. You discovered that adding 
-        a GIN index on the metadata JSONB column reduced query time from 
-        2.3s to 45ms."
-
-You: "Remember that React hooks bug?"
-Claude: "Yes, from last week. The useEffect was missing a dependency on 
-        userId, causing stale closures in the event handler."
-
-You: "Have we discussed WebSocket authentication before?"
-Claude: "3 conversations found:
-        - Oct 12: Implemented JWT handshake for Socket.io
-        - Nov 3: Solved reconnection auth with refresh tokens  
-        - Nov 20: Added rate limiting per authenticated connection"
+# 3) Add MCP server to Claude Code (set your project id)
+claude-self-reflect-path=$(pwd)
+cd /path/to/your-project-dir
+claude mcp add claude-self-reflect "$(claude-self-reflect-path)/run-mcp-docker.sh" \
+  -e QDRANT_URL="http://localhost:6333" \
+  -e PROJECT_ID="my-project-id"
 ```
 
-## The Secret Sauce: Sub-Agents
+## Configuration (env)
+Minimal variables you may want to set:
+- QDRANT_URL: URL of Qdrant API (e.g., http://localhost:6333)
+- EMBEDDING_MODEL: embedding model name (required)
+- VECTOR_SIZE: embedding dimension (required; must match model)
+- ENABLE_MEMORY_DECAY, DECAY_WEIGHT, DECAY_SCALE_DAYS: decay configuration (optional)
+- TRANSFORMERS_CACHE, MODEL_CACHE_DAYS: local model caching (optional)
+- LOG_LEVEL, LOG_FILE: logging (optional)
 
-Here's what makes this magical: **The Reflection Specialist sub-agent**.
+Example .env entries:
+```bash
+QDRANT_URL=http://localhost:6333
+PROJECT_ID=my-project-id
+EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+VECTOR_SIZE=384
+ENABLE_MEMORY_DECAY=true
+DECAY_WEIGHT=0.3
+DECAY_SCALE_DAYS=90
+MODEL_CACHE_DAYS=7
+TRANSFORMERS_CACHE=/home/mcpuser/.cache/huggingface
+LOG_LEVEL=INFO
+```
 
-When you ask about past conversations, Claude doesn't search in your main chat. Instead, it spawns a specialized sub-agent that:
-- Searches your conversation history in its own context
-- Brings back only the relevant results
-- Keeps your main conversation clean and focused
+## Default project resolution
+- If PROJECT_ID is set when adding the MCP server, it is used.
+- Otherwise the working directory (MCP_CLIENT_CWD) is used as fallback (converted to a dash-separated id).
 
-**Your main context stays pristine**. No clutter. No token waste.
+## Add MCP server (local alternative)
+If you prefer not to use Docker, the local script creates a venv and runs the server:
+```bash
+claude mcp add claude-self-reflect "$(claude-self-reflect-path)/mcp-server/run-mcp.sh" \
+  -e QDRANT_URL="http://localhost:6333" \
+  -e PROJECT_ID="my-project-id"
+```
 
-![Reflection Agent in Action](docs/images/Reflection-specialist.png)
+## MCP tools
+1) reflect_on_past
+- Inputs: query (str), limit (int, default 5), min_score (float, default 0.7),
+  project (omit to use default; "all" to search across all), tags (list or comma-separated), use_decay (1/0/-1)
 
-## How It Works (10 Second Version)
+2) store_reflection
+- Inputs: content (str), tags (list[str]), project (omit to use default)
 
-Your conversations → Vector embeddings → Semantic search → Claude remembers
+## Notes
+- EMBEDDING_MODEL and VECTOR_SIZE are mandatory; ensure VECTOR_SIZE matches the model’s output dimension.
+- Client-side decay fetches extra candidates; tune min_score and limit if needed.
+- On Ubuntu, system modules like python3-apt must be installed via apt, not pip.
 
-Technical details exist. You don't need them to start.
+Add this to your project's CLAUDE.md or global Claude instructions:
 
-## Using It
+```markdown
+## Memory and Context Tools
 
-Once installed, just talk naturally:
+You have access to semantic memory tools via MCP. Use them proactively:
 
-- "What did we discuss about database optimization?"
-- "Find our debugging session from last week"
-- "Remember this solution for next time"
+### When to Search Past Conversations
+- User asks about previous discussions or decisions
+- You need context about the project's history
+- Before implementing something that might have been discussed
+- To check for existing solutions to similar problems
 
-The reflection specialist automatically activates. No special commands needed.
+### When to Store Reflections
+- After solving a complex problem
+- When making important architecture decisions
+- After discovering useful patterns or techniques
+- When the user explicitly asks to remember something
+```
 
 ## Project-Scoped Search
 
-Conversations are now **project-aware by default**. When you ask about past conversations, Claude automatically searches within your current project directory, keeping results focused and relevant.
+Conversations are **project-aware by default**. The server resolves the default project as follows:
+- If PROJECT_ID is set when adding the MCP server, it will be used
+- Otherwise, the working directory (MCP_CLIENT_CWD) is used as fallback (converted to a dash-separated id)
+
+This keeps results focused and relevant to your project context.
 
 ### How It Works
 
-```
 # Example: Working in ~/projects/ShopifyMCPMockShop
 You: "What authentication method did we implement?"
 Claude: [Searches ONLY ShopifyMCPMockShop conversations]
         "Found 3 conversations about JWT authentication..."
 
-# To search everywhere (like pre-v2.4.3 behavior)
+# To search everywhere
 You: "Search all projects for WebSocket implementations"
 Claude: [Searches across ALL your projects]
         "Found implementations in 5 projects: ..."
@@ -98,137 +129,16 @@ Claude: [Searches across ALL your projects]
 # To search a specific project
 You: "Find Docker setup in claude-self-reflect project"
 Claude: [Searches only claude-self-reflect conversations]
-```
-
-### Key Behaviors
-
-| Search Type | How to Trigger | Example |
-|------------|----------------|---------|
-| **Current Project** (default) | Just ask normally | "What did we discuss about caching?" |
-| **All Projects** | Say "all projects" or "across projects" | "Search all projects for error handling" |
-| **Specific Project** | Mention the project name | "Find auth code in MyApp project" |
 
 ## Memory Decay
 
 Recent conversations matter more. Old ones fade. Like your brain, but reliable.
-
-Works perfectly out of the box. [Configure if you're particular](docs/memory-decay.md).
 
 ## For the Skeptics
 
 **"Just use grep"** - Sure, enjoy your 10,000 matches for "database"  
 **"Overengineered"** - Two functions: store_reflection, reflect_on_past  
 **"Another vector DB"** - Yes, because semantic > string matching
-
-Built by developers tired of re-explaining context every conversation.
-
-## Requirements
-
-- **Docker Desktop** (macOS/Windows) or **Docker Engine** (Linux)
-- **Claude Code** app
-
-## MCP Setup Options
-
-You can configure the MCP server in two ways:
-
-### Option 1: Containerized MCP Server (Recommended)
-
-Run the MCP server inside Docker for isolation and consistency:
-
-```bash
-# 1. Ensure Docker services are running
-docker compose --profile watch --profile mcp up -d
-
-# 2. Add containerized MCP to Claude Code
-claude mcp add claude-self-reflect "/path/to/claude-self-reflect/run-mcp-docker.sh" -e QDRANT_URL="http://qdrant:6333"
-
-# 3. Restart Claude Code to load the MCP server
-```
-
-**Benefits:**
-- ✅ No local Python environment needed
-- ✅ Consistent runtime environment 
-- ✅ Smart model caching (downloads once, uses offline mode after)
-- ✅ Automatic dependency management
-- ✅ Isolated from host system
-
-### Option 2: Local MCP Server
-
-Run the MCP server directly on your system:
-
-```bash
-# 1. Start Qdrant and watcher services
-docker compose --profile watch up -d
-
-# 2. Add local MCP to Claude Code  
-claude mcp add claude-self-reflect "/path/to/claude-self-reflect/mcp-server/run-mcp.sh" -e QDRANT_URL="http://localhost:6333"
-
-# 3. Restart Claude Code to load the MCP server
-```
-
-**Requirements:**
-- Python 3.11+
-- Virtual environment setup in `mcp-server/`
-- FastMCP and dependencies installed
-
-**Note:** Both options require the watcher service to continuously import new conversations from Claude Code.
-
-### Smart Model Caching
-
-The containerized MCP server includes intelligent model caching:
-
-- **First run**: Downloads model from Hugging Face (slow)
-- **Subsequent runs**: Uses cached model in offline mode (fast startup)
-- **Auto-refresh**: Checks for model updates after 7 days (configurable)
-- **Environment variable**: Set `MODEL_CACHE_DAYS=30` for custom refresh interval
-
-## Advanced Setup
-
-Want to customize? See [Configuration Guide](docs/installation-guide.md).
-
-## The Technical Stuff
-
-If you must know:
-
-- **Vector DB**: Qdrant (local, your data stays yours)
-- **Embeddings**: FastEmbed with sentence-transformers/all-MiniLM-L6-v2 (local)
-- **MCP Server**: Python + FastMCP
-- **Search**: Semantic similarity with time decay
-- **Import**: Continuous watcher service (60s interval)
-- **Storage**: Docker volumes for data persistence
-
-### Docker Services
-
-The system runs three main services:
-
-| Service | Purpose | Profile | Persistence |
-|---------|---------|---------|-------------|
-| **qdrant** | Vector database | (always) | `qdrant_data` volume |
-| **watcher** | Continuous import | `watch` | `watcher_state` volume |
-| **mcp-server** | Claude integration | `mcp` | `huggingface_cache` volume |
-
-```bash
-# Run specific service combinations
-docker compose up -d                                    # Just Qdrant
-docker compose --profile watch up -d                    # Qdrant + Watcher  
-docker compose --profile mcp up -d                      # Qdrant + MCP Server
-docker compose --profile watch --profile mcp up -d      # All services
-```
-
-Uses local FastEmbed embeddings for privacy, offline use, and no API dependencies.
-
-### Want More Details?
-
-- [Architecture Deep Dive](docs/architecture-details.md) - How it actually works
-- [Components Guide](docs/components.md) - Each piece explained
-- [Why We Built This](docs/motivation-and-history.md) - The full story
-- [Advanced Usage](docs/advanced-usage.md) - Power user features
-
-## Problems?
-
-- [Troubleshooting Guide](docs/troubleshooting.md)
-- [GitHub Issues](https://github.com/ramakay/claude-self-reflect/issues)
-- [Discussions](https://github.com/ramakay/claude-self-reflect/discussions)
 
 ---
 

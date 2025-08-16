@@ -48,7 +48,6 @@ jobs:
     - name: Check Python syntax
       run: |
         python -m py_compile mcp-server/src/*.py
-        python -m py_compile scripts/*.py
 
   docker-build:
     runs-on: ubuntu-latest
