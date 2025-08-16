@@ -100,35 +100,37 @@ done
 
 # Build the JSON request for reflect_on_past
 build_json_request() {
-    local json="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"reflect_on_past\",\"arguments\":{"
+    # Build arguments object first, then the full request
+    local args_json
+    args_json=$(jq -n \
+        --arg query "$QUERY" \
+        --argjson limit "$LIMIT" \
+        --argjson min_score "$MIN_SCORE" \
+        --arg project "$PROJECT" \
+        --arg tags "$TAGS" \
+        --argjson use_decay "$USE_DECAY" \
+        '{
+            query: $query
+        } |
+        if $limit != 5 then . + {limit: $limit} else . end |
+        if $min_score != 0.7 then . + {min_score: $min_score} else . end |
+        if $project != "" then . + {project: $project} else . end |
+        if $tags != "" then . + {tags: $tags} else . end |
+        if $use_decay != -1 then . + {use_decay: ($use_decay | tonumber | . == 1)} else . end'
+    )
     
-    # Query (required)
-    json+="\"query\":\"$QUERY\""
-    
-    # Optional parameters
-    if [ "$LIMIT" != "5" ]; then
-        json+=",\"limit\":$LIMIT"
-    fi
-    
-    if [ "$MIN_SCORE" != "0.7" ]; then
-        json+=",\"min_score\":$MIN_SCORE"
-    fi
-    
-    if [ -n "$PROJECT" ]; then
-        json+=",\"project\":\"$PROJECT\""
-    fi
-    
-    if [ -n "$TAGS" ]; then
-        # Pass tags as a comma-separated string (server will parse it)
-        json+=",\"tags\":\"$TAGS\""
-    fi
-    
-    if [ "$USE_DECAY" != "-1" ]; then
-        json+=",\"use_decay\":$USE_DECAY"
-    fi
-    
-    json+="}}}"
-    echo "$json"
+    # Build the complete JSON-RPC request
+    jq -n \
+        --argjson arguments "$args_json" \
+        '{
+            jsonrpc: "2.0",
+            id: 1,
+            method: "tools/call",
+            params: {
+                name: "reflect_on_past",
+                arguments: $arguments
+            }
+        }'
 }
 
 # Build the request
