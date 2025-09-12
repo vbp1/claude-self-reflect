@@ -200,14 +200,13 @@ async def start_model_initialization():
     logger.info(f"Starting background initialization of embedding model: {EMBEDDING_MODEL} (vector size: {VECTOR_SIZE})")
 
     # Schedule the initialization task
-    model_initialization_task = asyncio.create_task(
-        initialize_embedding_model_async(EMBEDDING_MODEL, CACHE_DIR)
-    )
+    model_initialization_task = asyncio.create_task(initialize_embedding_model_async(EMBEDDING_MODEL, CACHE_DIR))
 
     # Don't wait for it - let it run in background
     logger.info("Model initialization started in background")
 
     return model_initialization_task
+
 
 # Log effective configuration
 logger.info("Effective configuration:")
@@ -821,6 +820,7 @@ else:
     logger.info("Logging to console only")
 logger.info("Server starting...")
 
+
 async def create_server() -> FastMCP:
     """Factory function to create and initialize the MCP server."""
     # Start model initialization in background
@@ -831,7 +831,7 @@ async def create_server() -> FastMCP:
 
 
 # Export both mcp and create_server for different use cases
-__all__ = ['mcp', 'create_server']
+__all__ = ["mcp", "create_server"]
 
 
 if __name__ == "__main__":
@@ -841,5 +841,6 @@ if __name__ == "__main__":
 
     # Run the server using factory function for async initialization
     import asyncio
+
     server = asyncio.run(create_server())
     server.run()
