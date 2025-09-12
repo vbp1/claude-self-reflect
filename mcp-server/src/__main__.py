@@ -1,6 +1,19 @@
 """Main entry point for claude-reflect MCP server."""
 
 import argparse
+import asyncio
+
+
+async def run_server_with_background_init(transport: str):
+    """Run server with model initialization in background."""
+    from .server import mcp, start_model_initialization
+
+    # Start model initialization in background (non-blocking)
+    asyncio.create_task(start_model_initialization())
+
+    # Run the server immediately (model will initialize in background)
+    # The server will handle waiting for model when needed
+    await mcp.run_async(transport=transport, show_banner=False)
 
 
 def main():
@@ -14,12 +27,8 @@ def main():
     )
     args = parser.parse_args()
 
-    # Import is done here to make sure environment variables are loaded
-    from .server import mcp
-
-    # Run the server with the specified transport
-    # Disable FastMCP banner to prevent JSON output interference
-    mcp.run(transport=args.transport, show_banner=False)
+    # Run server with background initialization
+    asyncio.run(run_server_with_background_init(args.transport))
 
 
 if __name__ == "__main__":

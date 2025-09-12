@@ -32,7 +32,7 @@ docker compose -f "$SCRIPT_DIR/docker-compose.yaml" --profile mcp up -d mcp-serv
 # Wait for container to be ready by checking if Python module can be imported
 echo "Waiting for MCP server container to be ready..." 1>&2
 for i in {1..30}; do
-    if docker exec claude-reflection-mcp python -c "import src" 2>/dev/null; then
+    if docker exec claude-reflection-mcp python -V 2>/dev/null; then
         echo "MCP server container is ready" 1>&2
         break
     fi

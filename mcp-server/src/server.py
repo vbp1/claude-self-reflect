@@ -96,8 +96,15 @@ else:
 MAIN_COLLECTION = "claude_logs"
 
 
-def initialize_embedding_model(model_name: str, cache_dir: str):
-    """Initialize embedding model with smart offline/online mode."""
+# Global state for async model initialization
+local_embedding_model = None
+model_ready = asyncio.Event()
+model_initialization_task = None
+
+
+async def initialize_embedding_model_async(model_name: str, cache_dir: str):
+    """Initialize embedding model asynchronously with smart offline/online mode."""
+    global local_embedding_model
 
     def is_model_fresh(model_name: str, cache_dir: str, max_age_days: int = 7) -> bool:
         """Check if the model is cached and fresh (not older than max_age_days)."""
@@ -147,30 +154,60 @@ def initialize_embedding_model(model_name: str, cache_dir: str):
         os.environ["HF_HUB_OFFLINE"] = "0"
 
     try:
-        # Update timestamp file after successful initialization
-        model_cache_path = Path(cache_dir) / model_name.replace("/", "_")
-        timestamp_file = model_cache_path / ".timestamp"
+        # Run model initialization in executor to avoid blocking
+        loop = asyncio.get_event_loop()
 
-        # Ensure directory exists
-        model_cache_path.mkdir(parents=True, exist_ok=True)
+        def init_model():
+            # Update timestamp file after successful initialization
+            model_cache_path = Path(cache_dir) / model_name.replace("/", "_")
+            timestamp_file = model_cache_path / ".timestamp"
 
-        model = TextEmbedding(model_name=model_name, cache_dir=model_cache_path)
+            # Ensure directory exists
+            model_cache_path.mkdir(parents=True, exist_ok=True)
 
-        # Write current timestamp
-        with open(timestamp_file, "w") as f:
-            f.write(str(time.time()))
+            model = TextEmbedding(model_name=model_name, cache_dir=model_cache_path)
 
-        logger.info(f"Model initialized successfully: {model_name}")
-        return model
+            # Write current timestamp
+            with open(timestamp_file, "w") as f:
+                f.write(str(time.time()))
+
+            logger.info(f"Model initialized successfully: {model_name}")
+            return model
+
+        # Initialize model in thread pool to avoid blocking
+        local_embedding_model = await loop.run_in_executor(None, init_model)
+
+        # Signal that model is ready
+        model_ready.set()
+        logger.info(f"Embedding model is ready for use: {model_name}")
+
+        return local_embedding_model
 
     except ImportError:
         logger.error("FastEmbed not available. Install with: pip install fastembed")
+        model_ready.set()  # Set even on error to unblock waiting tasks
+        raise
+    except Exception as e:
+        logger.error(f"Failed to initialize embedding model: {e}")
+        model_ready.set()  # Set even on error to unblock waiting tasks
         raise
 
 
-# Initialize local embedding model with smart caching
-logger.info(f"Initializing embedding model: {EMBEDDING_MODEL} (vector size: {VECTOR_SIZE})")
-local_embedding_model = initialize_embedding_model(EMBEDDING_MODEL, CACHE_DIR)
+async def start_model_initialization():
+    """Start async model initialization in background."""
+    global model_initialization_task
+
+    logger.info(f"Starting background initialization of embedding model: {EMBEDDING_MODEL} (vector size: {VECTOR_SIZE})")
+
+    # Schedule the initialization task
+    model_initialization_task = asyncio.create_task(
+        initialize_embedding_model_async(EMBEDDING_MODEL, CACHE_DIR)
+    )
+
+    # Don't wait for it - let it run in background
+    logger.info("Model initialization started in background")
+
+    return model_initialization_task
 
 # Log effective configuration
 logger.info("Effective configuration:")
@@ -237,8 +274,13 @@ def normalize_text(text: str) -> str:
 
 async def generate_embedding(text: str) -> List[float]:
     """Generate embedding using local FastEmbed model."""
+    # Wait for model to be ready (will return immediately if already ready)
+    if not model_ready.is_set():
+        logger.info("Waiting for embedding model to initialize...")
+        await model_ready.wait()
+
     if not local_embedding_model:
-        raise ValueError("Local embedding model not initialized")
+        raise ValueError("Local embedding model failed to initialize")
 
     # Normalize text before embedding
     normalized_text = normalize_text(text)
@@ -779,7 +821,25 @@ else:
     logger.info("Logging to console only")
 logger.info("Server starting...")
 
+async def create_server() -> FastMCP:
+    """Factory function to create and initialize the MCP server."""
+    # Start model initialization in background
+    await start_model_initialization()
+
+    # Return the configured MCP server
+    return mcp
+
+
+# Export both mcp and create_server for different use cases
+__all__ = ['mcp', 'create_server']
+
+
 if __name__ == "__main__":
     logger.info(f"MCP server started with args: {sys.argv}")
     logger.info(f"Current working directory: {os.getcwd()}")
     logger.info(f"Python path: {sys.path}")
+
+    # Run the server using factory function for async initialization
+    import asyncio
+    server = asyncio.run(create_server())
+    server.run()
