@@ -9,7 +9,7 @@ async def run_server_with_background_init(transport: str):
     from .server import mcp, start_model_initialization
 
     # Start model initialization in background (non-blocking)
-    asyncio.create_task(start_model_initialization())
+    await start_model_initialization()
 
     # Run the server immediately (model will initialize in background)
     # The server will handle waiting for model when needed

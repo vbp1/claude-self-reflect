@@ -29,10 +29,19 @@ SCRIPT_DIR="$(dirname "${BASH_SOURCE[0]}")"
 # Ensure MCP server container is running
 docker compose -f "$SCRIPT_DIR/docker-compose.yaml" --profile mcp up -d mcp-server
 
-# Wait for container to be ready by checking if Python module can be imported
+# Wait for container to be ready
 echo "Waiting for MCP server container to be ready..." 1>&2
+
+# Get container ID from docker compose
+CID="$(docker compose -f "$SCRIPT_DIR/docker-compose.yaml" --profile mcp ps -q mcp-server)"
+
+if [ -z "$CID" ]; then
+    echo "Error: Could not find MCP server container ID" 1>&2
+    exit 1
+fi
+
 for i in {1..30}; do
-    if docker exec claude-reflection-mcp python -V 2>/dev/null; then
+    if docker exec "$CID" python -V >/dev/null 2>&1; then
         echo "MCP server container is ready" 1>&2
         break
     fi
@@ -44,7 +53,7 @@ for i in {1..30}; do
 done
 
 # Execute MCP server in the running container via stdio
-EXEC_CMD=(docker exec -i)
+EXEC_CMD=(docker exec -i "$CID")
 
 # Select environment variables to forward into the container
 VARS_TO_FWD=(
@@ -74,6 +83,6 @@ done
 EXEC_CMD+=("-e" "PYTHONUNBUFFERED=1")
 
 # Command to run inside the container
-EXEC_CMD+=(claude-reflection-mcp python -m src)
+EXEC_CMD+=(python -m src)
 
 exec "${EXEC_CMD[@]}"

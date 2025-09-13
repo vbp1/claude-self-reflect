@@ -154,20 +154,18 @@ async def initialize_embedding_model_async(model_name: str, cache_dir: str):
         os.environ["HF_HUB_OFFLINE"] = "0"
 
     try:
-        # Run model initialization in executor to avoid blocking
-        loop = asyncio.get_event_loop()
-
+        # Run model initialization in a thread to avoid blocking
         def init_model():
-            # Update timestamp file after successful initialization
             model_cache_path = Path(cache_dir) / model_name.replace("/", "_")
             timestamp_file = model_cache_path / ".timestamp"
 
             # Ensure directory exists
             model_cache_path.mkdir(parents=True, exist_ok=True)
 
+            # Create model first
             model = TextEmbedding(model_name=model_name, cache_dir=model_cache_path)
 
-            # Write current timestamp
+            # Write current timestamp only after successful model creation
             with open(timestamp_file, "w") as f:
                 f.write(str(time.time()))
 
@@ -175,7 +173,7 @@ async def initialize_embedding_model_async(model_name: str, cache_dir: str):
             return model
 
         # Initialize model in thread pool to avoid blocking
-        local_embedding_model = await loop.run_in_executor(None, init_model)
+        local_embedding_model = await asyncio.to_thread(init_model)
 
         # Signal that model is ready
         model_ready.set()
@@ -197,7 +195,20 @@ async def start_model_initialization():
     """Start async model initialization in background."""
     global model_initialization_task
 
-    logger.info(f"Starting background initialization of embedding model: {EMBEDDING_MODEL} (vector size: {VECTOR_SIZE})")
+    logger.info(
+        "Starting background initialization of embedding model: %s (vector size: %s)",
+        EMBEDDING_MODEL,
+        VECTOR_SIZE,
+    )
+
+    # If already started, return existing task
+    if model_initialization_task and not model_initialization_task.done():
+        logger.info("Model initialization already in progress")
+        return model_initialization_task
+
+    # Clear readiness in case of restart
+    if model_ready.is_set():
+        model_ready.clear()
 
     # Schedule the initialization task
     model_initialization_task = asyncio.create_task(initialize_embedding_model_async(EMBEDDING_MODEL, CACHE_DIR))
@@ -279,15 +290,20 @@ async def generate_embedding(text: str) -> List[float]:
         await model_ready.wait()
 
     if not local_embedding_model:
-        raise ValueError("Local embedding model failed to initialize")
+        raise RuntimeError("Local embedding model failed to initialize")
 
     # Normalize text before embedding
     normalized_text = normalize_text(text)
 
-    # Run in executor since fastembed is synchronous
-    loop = asyncio.get_event_loop()
-    embeddings = await loop.run_in_executor(None, lambda: list(local_embedding_model.embed([normalized_text])))
-    return embeddings[0].tolist()
+    # Run in thread since fastembed is synchronous
+    embeddings = await asyncio.to_thread(lambda: list(local_embedding_model.embed([normalized_text])))
+    vec = embeddings[0].tolist()
+
+    # Validate vector size
+    if len(vec) != VECTOR_SIZE:
+        raise ValueError(f"Embedding size mismatch: expected {VECTOR_SIZE}, got {len(vec)}")
+
+    return vec
 
 
 # Helper functions for search
@@ -840,7 +856,5 @@ if __name__ == "__main__":
     logger.info(f"Python path: {sys.path}")
 
     # Run the server using factory function for async initialization
-    import asyncio
-
     server = asyncio.run(create_server())
     server.run()
