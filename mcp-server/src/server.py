@@ -277,9 +277,7 @@ def normalize_text(text: str) -> str:
 
     # Normalize whitespace - replace multiple spaces/tabs/newlines with single space
     # and strip leading/trailing whitespace
-    normalized = " ".join(normalized.split())
-
-    return normalized
+    return " ".join(normalized.split())
 
 
 async def generate_embedding(text: str) -> List[float]:
@@ -321,9 +319,9 @@ def build_native_decay_query(_: list) -> FormulaQuery:
 
     decay = ExpDecayExpression(
         exp_decay=DecayParamsExpression(
-            x=DatetimeKeyExpression(datetime_key="timestamp"),  # поле с датой в payload
-            target=DatetimeExpression(datetime=current_time),  # текущее время в ISO-8601
-            # scale в секундах (POSIX seconds), а НЕ миллисекундах:
+            x=DatetimeKeyExpression(datetime_key="timestamp"),  # field with date in payload
+            target=DatetimeExpression(datetime=current_time),  # current time in ISO-8601
+            # scale in seconds (POSIX seconds), NOT milliseconds:
             scale=int(DECAY_SCALE_DAYS * 24 * 60 * 60),
         )
     )
@@ -355,7 +353,7 @@ def calculate_client_side_decay(point, min_score: float) -> Optional[float]:
     - Документ 90 дней: final = 0.7 * similarity + 0.3 * 0.37
     - Документ 180 дней: final = 0.7 * similarity + 0.3 * 0.14
     """
-    # Пропускаем документы с низким базовым score
+    # Skip documents with low base score
     if point.score < min_score:
         return None
 
@@ -378,9 +376,7 @@ def calculate_client_side_decay(point, min_score: float) -> Optional[float]:
         decay_factor = math.exp(-age_days / DECAY_SCALE_DAYS)
 
         # Взвешенная комбинация: 70% similarity + 30% freshness
-        final_score = (1 - DECAY_WEIGHT) * point.score + DECAY_WEIGHT * decay_factor
-
-        return final_score
+        return (1 - DECAY_WEIGHT) * point.score + DECAY_WEIGHT * decay_factor
 
     except (ValueError, TypeError) as e:
         logger.debug(f"Error parsing timestamp: {e}")
@@ -471,7 +467,7 @@ async def perform_qdrant_search(
             query_obj = build_native_decay_query(query_embedding)
             logger.info("Native decay query object created")
 
-            # Шаг 2: Выполняем поиск с decay на стороне Qdrant
+            # Step 2: Execute search with decay on Qdrant side
             logger.info("Executing query_points with native decay...")
             query_result = await qdrant_client.query_points(
                 collection_name=MAIN_COLLECTION,
@@ -500,7 +496,7 @@ async def perform_qdrant_search(
             query_result = await qdrant_client.query_points(
                 collection_name=MAIN_COLLECTION,
                 query=query_embedding,
-                limit=limit * 3,  # Берём с запасом для последующей фильтрации
+                limit=limit * 3,  # Take extra for subsequent filtering
                 with_payload=True,
                 query_filter=search_filter,  # Фильтр по проекту
                 with_vectors=False,
@@ -514,7 +510,7 @@ async def perform_qdrant_search(
 
         else:
             # Вариант 3: Стандартный поиск без decay
-            # Шаг 1: Обычный векторный поиск с порогом similarity
+            # Step 1: Regular vector search with similarity threshold
             logger.info(f"Using STANDARD search without decay for {MAIN_COLLECTION}")
             logger.info(f"Executing query_points with score_threshold={min_score}...")
             query_result = await qdrant_client.query_points(
@@ -541,7 +537,7 @@ async def perform_qdrant_search(
                     logger.debug(f"Added result with score {search_result.score}")
                 else:
                     logger.debug(f"Filtered out result below min_score {min_score}")
-            except Exception as e:
+            except (ValueError, TypeError, AttributeError, KeyError) as e:
                 logger.error(f"Error converting point {point.id}: {e!s}")
                 continue
 
@@ -707,7 +703,7 @@ async def reflect_on_past(
         # Check if main collection exists
         try:
             await qdrant_client.get_collection(MAIN_COLLECTION)
-        except Exception:
+        except (models.UnexpectedResponse, ConnectionError, TimeoutError):
             return f"Collection '{MAIN_COLLECTION}' not found."
 
         # Build search filter using helper function
@@ -731,7 +727,7 @@ async def reflect_on_past(
                 should_use_decay=should_use_decay,
             )
 
-        except Exception as e:
+        except (models.UnexpectedResponse, ConnectionError, TimeoutError, ValueError) as e:
             logger.error(f"Error searching {MAIN_COLLECTION}: {e!s}")
             return f"Error searching conversations: {e!s}"
 
@@ -761,7 +757,7 @@ async def reflect_on_past(
 
         return result_text
 
-    except Exception as e:
+    except (ValueError, TypeError, RuntimeError, ConnectionError) as e:
         await ctx.error(f"Search failed: {e!s}")
         return f"Failed to search conversations: {e!s}"
 
@@ -785,7 +781,7 @@ async def store_reflection(
         # Ensure main collection exists
         try:
             await qdrant_client.get_collection(MAIN_COLLECTION)
-        except Exception:
+        except (models.UnexpectedResponse, ConnectionError, TimeoutError):
             # Create collection if it doesn't exist
             await qdrant_client.create_collection(
                 collection_name=MAIN_COLLECTION,
@@ -821,7 +817,7 @@ async def store_reflection(
         tags_str = ", ".join(tags) if tags else "none"
         return f"Reflection stored successfully in project '{project_name}' with tags: {tags_str}"
 
-    except Exception as e:
+    except (ValueError, TypeError, RuntimeError, ConnectionError) as e:
         await ctx.error(f"Store failed: {e!s}")
         return f"Failed to store reflection: {e!s}"
 
