@@ -53,7 +53,8 @@ for i in {1..30}; do
 done
 
 # Execute MCP server in the running container via stdio
-EXEC_CMD=(docker exec -i "$CID")
+# Build docker exec command with environment variables
+EXEC_CMD=(docker exec -i)
 
 # Select environment variables to forward into the container
 VARS_TO_FWD=(
@@ -81,6 +82,9 @@ done
 
 # Always ensure unbuffered output for timely logs
 EXEC_CMD+=("-e" "PYTHONUNBUFFERED=1")
+
+# Add container ID
+EXEC_CMD+=("$CID")
 
 # Command to run inside the container
 EXEC_CMD+=(python -m src)
