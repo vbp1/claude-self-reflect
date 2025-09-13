@@ -74,7 +74,7 @@ async def test_startup_initialization():
             print(
                 "⚠️  WARNING: Initialization task completed immediately (possibly cached model)"
             )
-        except Exception as e:  # noqa: BLE001
+        except (ImportError, RuntimeError, ValueError) as e:
             print(f"❌ ERROR: Initialization task failed: {e}")
             return False
     else:
@@ -111,7 +111,7 @@ async def test_startup_initialization():
 
         return True
 
-    except Exception as e:  # noqa: BLE001
+    except (RuntimeError, ValueError, ImportError) as e:
         print(f"❌ ERROR: First embedding call failed: {e}")
         import traceback
 
@@ -129,7 +129,7 @@ async def main():
         else:
             print("\n❌ Startup tests failed!")
             return 1
-    except Exception as e:  # noqa: BLE001
+    except (RuntimeError, ValueError, ImportError, KeyboardInterrupt) as e:
         print(f"\n💥 Test crashed: {e}")
         import traceback
 
