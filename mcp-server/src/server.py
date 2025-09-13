@@ -1,34 +1,34 @@
 """Claude Reflect MCP Server with Memory Decay."""
 
+import asyncio
+import logging
 import math
 import os
-import asyncio
+import re
 import sys
 import time
-from pathlib import Path
-from typing import Optional, List, Union
-from datetime import datetime, timezone
-import logging
 import unicodedata
-import re
-
-from fastmcp import FastMCP, Context
-from pydantic import BaseModel, Field
-from qdrant_client import AsyncQdrantClient
-from qdrant_client.models import PointStruct, VectorParams, Distance
-from qdrant_client import models
-from qdrant_client.models import (
-    FormulaQuery,
-    SumExpression,
-    MultExpression,
-    ExpDecayExpression,
-    DecayParamsExpression,
-    DatetimeExpression,
-    DatetimeKeyExpression,
-)
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import List, Optional, Union
 
 from dotenv import load_dotenv
 from fastembed import TextEmbedding
+from fastmcp import Context, FastMCP
+from pydantic import BaseModel, Field
+from qdrant_client import AsyncQdrantClient, models
+from qdrant_client.models import (
+    DatetimeExpression,
+    DatetimeKeyExpression,
+    DecayParamsExpression,
+    Distance,
+    ExpDecayExpression,
+    FormulaQuery,
+    MultExpression,
+    PointStruct,
+    SumExpression,
+    VectorParams,
+)
 
 # Load environment variables from current directory
 load_dotenv()
@@ -423,19 +423,18 @@ def convert_point_to_search_result(point, min_score: float) -> SearchResult:
     # Возвращаем только если не ниже порога
     if score is None or score < min_score:
         return None
-    else:
-        return SearchResult(
-            id=str(point.id),
-            score=score,  # Используем найденный score
-            timestamp=clean_timestamp,
-            # Используем start_role если есть, иначе role, иначе 'unknown'
-            role=point.payload.get("start_role", point.payload.get("role", "unknown")),
-            excerpt=point.payload.get("text", ""),
-            project_name=point.payload.get("project_name", point.payload.get("project", "unknown")),
-            conversation_id=point.payload.get("conversation_id"),
-            field=point.payload.get("field"),  # Тип контента: text, code, stdout, error
-            tags=point.payload.get("tags"),  # Теги для рефлексий
-        )
+    return SearchResult(
+        id=str(point.id),
+        score=score,  # Используем найденный score
+        timestamp=clean_timestamp,
+        # Используем start_role если есть, иначе role, иначе 'unknown'
+        role=point.payload.get("start_role", point.payload.get("role", "unknown")),
+        excerpt=point.payload.get("text", ""),
+        project_name=point.payload.get("project_name", point.payload.get("project", "unknown")),
+        conversation_id=point.payload.get("conversation_id"),
+        field=point.payload.get("field"),  # Тип контента: text, code, stdout, error
+        tags=point.payload.get("tags"),  # Теги для рефлексий
+    )
 
 
 async def perform_qdrant_search(
@@ -543,7 +542,7 @@ async def perform_qdrant_search(
                 else:
                     logger.debug(f"Filtered out result below min_score {min_score}")
             except Exception as e:
-                logger.error(f"Error converting point {point.id}: {str(e)}")
+                logger.error(f"Error converting point {point.id}: {e!s}")
                 continue
 
         # Шаг 3: Сортируем по убыванию финального score
@@ -557,7 +556,7 @@ async def perform_qdrant_search(
         return all_results
 
     except Exception as e:
-        logger.error(f"Error searching {MAIN_COLLECTION}: {str(e)}")
+        logger.error(f"Error searching {MAIN_COLLECTION}: {e!s}")
         logger.error(f"Exception type: {type(e).__name__}")
         logger.error(f"Search filter was: {search_filter}")
         import traceback
@@ -690,8 +689,8 @@ async def reflect_on_past(
     if isinstance(use_decay, str):
         try:
             use_decay = int(use_decay)
-        except ValueError:
-            raise ValueError("use_decay must be '1', '0', or '-1'")
+        except ValueError as e:
+            raise ValueError("use_decay must be '1', '0', or '-1'") from e
 
     # Parse decay parameter using integer approach
     should_use_decay = (
@@ -733,8 +732,8 @@ async def reflect_on_past(
             )
 
         except Exception as e:
-            logger.error(f"Error searching {MAIN_COLLECTION}: {str(e)}")
-            return f"Error searching conversations: {str(e)}"
+            logger.error(f"Error searching {MAIN_COLLECTION}: {e!s}")
+            return f"Error searching conversations: {e!s}"
 
         # Sort by score and limit
         all_results.sort(key=lambda x: x.score, reverse=True)
@@ -763,8 +762,8 @@ async def reflect_on_past(
         return result_text
 
     except Exception as e:
-        await ctx.error(f"Search failed: {str(e)}")
-        return f"Failed to search conversations: {str(e)}"
+        await ctx.error(f"Search failed: {e!s}")
+        return f"Failed to search conversations: {e!s}"
 
 
 @mcp.tool()
@@ -823,8 +822,8 @@ async def store_reflection(
         return f"Reflection stored successfully in project '{project_name}' with tags: {tags_str}"
 
     except Exception as e:
-        await ctx.error(f"Store failed: {str(e)}")
-        return f"Failed to store reflection: {str(e)}"
+        await ctx.error(f"Store failed: {e!s}")
+        return f"Failed to store reflection: {e!s}"
 
 
 # Debug output
@@ -847,7 +846,7 @@ async def create_server() -> FastMCP:
 
 
 # Export both mcp and create_server for different use cases
-__all__ = ["mcp", "create_server"]
+__all__ = ["create_server", "mcp"]
 
 
 if __name__ == "__main__":
