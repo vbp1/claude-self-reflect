@@ -81,11 +81,7 @@ VECTOR_SIZE = int(os.getenv("VECTOR_SIZE"))
 
 # Get cache directory from environment using pathlib
 _TRANSFORMERS_CACHE_ENV = os.getenv("TRANSFORMERS_CACHE")
-CACHE_DIR = (
-    Path(_TRANSFORMERS_CACHE_ENV).expanduser()
-    if _TRANSFORMERS_CACHE_ENV
-    else Path.home().joinpath(".cache/huggingface").expanduser()
-)
+CACHE_DIR = Path(_TRANSFORMERS_CACHE_ENV).expanduser() if _TRANSFORMERS_CACHE_ENV else Path.home().joinpath(".cache/huggingface").expanduser()
 MODEL_CACHE_DAYS = int(os.getenv("MODEL_CACHE_DAYS", "7"))
 
 # Determine project name that will be used for all searches
