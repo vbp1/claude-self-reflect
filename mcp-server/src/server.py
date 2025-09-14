@@ -238,7 +238,7 @@ logger.info(f"Default project name for searches: {DEFAULT_PROJECT_NAME}")
 class SearchResult(BaseModel):
     """A single search result."""
 
-    id: str
+    result_id: str
     score: float
     timestamp: str
     role: str
@@ -420,7 +420,7 @@ def convert_point_to_search_result(point, min_score: float) -> SearchResult:
     if score is None or score < min_score:
         return None
     return SearchResult(
-        id=str(point.id),
+        result_id=str(point.id),
         score=score,  # Используем найденный score
         timestamp=clean_timestamp,
         # Используем start_role если есть, иначе role, иначе 'unknown'
