@@ -103,6 +103,8 @@ MAIN_COLLECTION = "claude_logs"
 local_embedding_model = None
 model_ready = asyncio.Event()
 model_initialization_task = None
+# Serialize concurrent initialization attempts to avoid duplicate tasks
+model_init_lock = asyncio.Lock()
 
 
 async def initialize_embedding_model_async(model_name: str, cache_dir: str):
@@ -195,31 +197,36 @@ async def initialize_embedding_model_async(model_name: str, cache_dir: str):
 
 
 async def start_model_initialization():
-    """Start async model initialization in background."""
+    """Start async model initialization in background.
+
+    Uses a module-level asyncio.Lock to serialize concurrent calls so only one
+    background task is created and shared among callers.
+    """
     global model_initialization_task
 
-    logger.info(
-        "Starting background initialization of embedding model: %s (vector size: %s)",
-        EMBEDDING_MODEL,
-        VECTOR_SIZE,
-    )
+    async with model_init_lock:
+        logger.info(
+            "Starting background initialization of embedding model: %s (vector size: %s)",
+            EMBEDDING_MODEL,
+            VECTOR_SIZE,
+        )
 
-    # If already started, return existing task
-    if model_initialization_task and not model_initialization_task.done():
-        logger.info("Model initialization already in progress")
+        # If already started, return existing task
+        if model_initialization_task and not model_initialization_task.done():
+            logger.info("Model initialization already in progress")
+            return model_initialization_task
+
+        # Clear readiness in case of restart
+        if model_ready.is_set():
+            model_ready.clear()
+
+        # Schedule the initialization task
+        model_initialization_task = asyncio.create_task(initialize_embedding_model_async(EMBEDDING_MODEL, CACHE_DIR))
+
+        # Don't wait for it - let it run in background
+        logger.info("Model initialization started in background")
+
         return model_initialization_task
-
-    # Clear readiness in case of restart
-    if model_ready.is_set():
-        model_ready.clear()
-
-    # Schedule the initialization task
-    model_initialization_task = asyncio.create_task(initialize_embedding_model_async(EMBEDDING_MODEL, CACHE_DIR))
-
-    # Don't wait for it - let it run in background
-    logger.info("Model initialization started in background")
-
-    return model_initialization_task
 
 
 # Log effective configuration
