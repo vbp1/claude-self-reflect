@@ -78,7 +78,8 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL")
 VECTOR_SIZE = int(os.getenv("VECTOR_SIZE"))
 
 # Get cache directory from environment
-CACHE_DIR = os.getenv("TRANSFORMERS_CACHE", "/home/mcpuser/.cache/huggingface")
+HOME_DIR = os.getenv("HOME")
+CACHE_DIR = os.getenv("TRANSFORMERS_CACHE", HOME_DIR + "/.cache/huggingface")
 MODEL_CACHE_DAYS = int(os.getenv("MODEL_CACHE_DAYS", "7"))
 
 # Determine project name that will be used for all searches
