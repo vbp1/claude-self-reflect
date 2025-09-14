@@ -8,6 +8,7 @@ import re
 import sys
 import time
 import unicodedata
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Union
@@ -438,8 +439,11 @@ def convert_point_to_search_result(point, min_score: float) -> SearchResult:
         # Если нет timestamp, используем текущее время
         clean_timestamp = datetime.now(timezone.utc).isoformat()
 
-    # Получаем score - может быть в point.score (native) или в payload (client-side decay)
-    score = point.score if hasattr(point, "score") and point.score is not None else point.payload.get("score")
+    # Determine final score source:
+    # - Client-side decay stores final score in payload['score']
+    # - Native/standard search uses point.score from Qdrant
+    payload_score = point.payload.get("score")
+    score = payload_score if payload_score is not None else (point.score if getattr(point, "score", None) is not None else None)
 
     # Возвращаем только если не ниже порога
     if score is None or score < min_score:
@@ -817,10 +821,10 @@ async def store_reflection(
         # Generate embedding for the reflection
         embedding = await generate_embedding(content)
 
-        # Create point with metadata
-        point_id = datetime.now(timezone.utc).timestamp()
+        # Create point with unique UUID to avoid ID collisions under concurrency
+        point_id = str(uuid.uuid4())
         point = PointStruct(
-            id=int(point_id),
+            id=point_id,
             vector=embedding,
             payload={
                 "text": content,
@@ -830,7 +834,7 @@ async def store_reflection(
                 "role": "user_reflection",
                 "start_role": "user_reflection",  # For compatibility with search
                 "project_name": project_name,  # Use consistent field name
-                "conversation_id": f"reflection_{int(point_id)}",
+                "conversation_id": f"reflection_{point_id}",
                 "field": "text",
                 "source": "reflection",
             },
