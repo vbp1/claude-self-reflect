@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from contextlib import suppress
 from pathlib import Path
 
 # Colors for output
@@ -94,15 +95,26 @@ def test_docker_container():
 
 def cleanup_process(process):
     """Properly terminate and reap a subprocess to avoid zombies."""
-    if process and process.poll() is None:  # Process is still running
+    if process is None:
+        return
+
+    # Check if process is still running
+    if process.poll() is None:
         # Try graceful termination first
         process.terminate()
         try:
-            process.wait(timeout=2)  # Wait up to 2 seconds for termination
+            # Wait for graceful termination with short timeout
+            process.wait(timeout=1)
         except subprocess.TimeoutExpired:
             # Force kill if still running
             process.kill()
-            process.wait()  # This should return immediately after kill
+            # Wait again to ensure process is reaped
+            with suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=1)
+    else:
+        # Process already terminated, but ensure it's reaped
+        with suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=0.1)
 
 
 def test_mcp_protocol():
@@ -171,6 +183,9 @@ def test_mcp_protocol():
 
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as e:
         print_test(f"MCP protocol: {e}", "SKIP")
+        # Ensure process is cleaned up before returning
+        if process is not None:
+            cleanup_process(process)
         return True
     finally:
         # Always cleanup the process
