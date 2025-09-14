@@ -299,23 +299,21 @@ qdrant_client = AsyncQdrantClient(url=QDRANT_URL)
 
 def normalize_text(text: str) -> str:
     """
-    Normalize text for embedding using Unicode normalization.
+    Normalize text for embedding and search.
 
-    This ensures consistent representation of text regardless of:
-    - Different Unicode representations (é vs e + ́)
-    - Case differences
-    - Whitespace variations
+    - Apply NFKD to decompose characters
+    - Strip diacritics/combining marks (e.g., 'é' -> 'e')
+    - Casefold for case-insensitive matching
+    - Collapse all whitespace to single spaces
     """
-    # Unicode normalization to NFC (Canonical Composition)
-    # This ensures that é is represented as a single character, not e + combining accent
-    normalized = unicodedata.normalize("NFC", text)
-
-    # Convert to lowercase for case-insensitive matching
-    normalized = normalized.casefold()
-
-    # Normalize whitespace - replace multiple spaces/tabs/newlines with single space
-    # and strip leading/trailing whitespace
-    return " ".join(normalized.split())
+    # Decompose characters to separate base letters and combining marks
+    decomposed = unicodedata.normalize("NFKD", text)
+    # Remove combining diacritical marks
+    no_marks = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    # Case-insensitive
+    lowered = no_marks.casefold()
+    # Normalize whitespace
+    return " ".join(lowered.split())
 
 
 async def generate_embedding(text: str) -> List[float]:
@@ -692,7 +690,6 @@ def build_search_filter(
 
 
 # Register tools
-@mcp.tool()
 async def reflect_on_past(
     ctx: Context,
     query: str = Field(description="The search query to find semantically similar conversations"),
@@ -753,7 +750,7 @@ async def reflect_on_past(
         # Check if main collection exists
         try:
             await qdrant_client.get_collection(MAIN_COLLECTION)
-        except (QdrantUnexpectedResponse, ConnectionError, TimeoutError, httpx.RequestError):
+        except (QdrantUnexpectedResponse, ConnectionError, TimeoutError, httpx.RequestError, TypeError):
             return f"Collection '{MAIN_COLLECTION}' not found."
 
         # Build search filter using helper function
@@ -812,7 +809,6 @@ async def reflect_on_past(
         return f"Failed to search conversations: {e!s}"
 
 
-@mcp.tool()
 async def store_reflection(
     ctx: Context,
     content: str = Field(description="The information, insight or reflection to store"),
@@ -831,7 +827,7 @@ async def store_reflection(
         # Ensure main collection exists
         try:
             await qdrant_client.get_collection(MAIN_COLLECTION)
-        except (QdrantUnexpectedResponse, ConnectionError, TimeoutError, httpx.RequestError):
+        except (QdrantUnexpectedResponse, ConnectionError, TimeoutError, httpx.RequestError, TypeError):
             # Create collection if it doesn't exist
             await qdrant_client.create_collection(
                 collection_name=MAIN_COLLECTION,
@@ -893,6 +889,11 @@ async def create_server() -> FastMCP:
 
 # Export both mcp and create_server for different use cases
 __all__ = ["create_server", "mcp"]
+
+# Register FastMCP tools without shadowing function callables
+# Tool names remain equal to function names for test expectations
+reflect_on_past_tool = mcp.tool()(reflect_on_past)
+store_reflection_tool = mcp.tool()(store_reflection)
 
 
 if __name__ == "__main__":
