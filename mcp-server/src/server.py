@@ -816,7 +816,7 @@ async def reflect_on_past(
 async def store_reflection(
     ctx: Context,
     content: str = Field(description="The information, insight or reflection to store"),
-    tags: List[str] = Field(default=[], description="Tags to categorize this information, insight or reflection"),
+    tags: List[str] = Field(default_factory=list, description="Tags to categorize this information, insight or reflection"),
     project: Optional[str] = Field(
         default=None,
         description="Target project for the stored information, insight or reflection. If not provided, uses current project.",
@@ -900,6 +900,9 @@ if __name__ == "__main__":
     logger.info(f"Current working directory: {os.getcwd()}")
     logger.info(f"Python path: {sys.path}")
 
-    # Run the server using factory function for async initialization
-    server = asyncio.run(create_server())
-    server.run()
+    # Run the server using factory function for async initialization in the same loop
+    async def _main():
+        server = await create_server()
+        await server.run_async()
+
+    asyncio.run(_main())
