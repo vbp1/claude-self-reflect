@@ -2,9 +2,12 @@
 
 import argparse
 import asyncio
+import os
+import signal
+from contextlib import suppress
 
 
-async def run_server_with_background_init(transport: str):
+async def run_server_with_background_init(transport: str) -> bool:
     """Run server with model initialization in background."""
     from .server import mcp, start_model_initialization
 
@@ -26,6 +29,16 @@ def main():
         default="stdio",
     )
     args = parser.parse_args()
+
+    # Install simple process-level handlers that also close stdin for stdio
+    def _force_quit(_signum, _frame):
+        with suppress(Exception):
+            os.write(2, b"\nServer stopped by user.\n")
+        os._exit(0)
+
+    with suppress(Exception):
+        signal.signal(signal.SIGTERM, _force_quit)
+        signal.signal(signal.SIGINT, _force_quit)
 
     # Run server with background initialization
     asyncio.run(run_server_with_background_init(args.transport))
