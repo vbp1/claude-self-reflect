@@ -26,7 +26,7 @@ def print_test(name: str, status: str):
 def test_python_import():
     """Test that server module can be imported."""
     try:
-        sys.path.insert(0, str(Path(__file__).parent / "mcp-server" / "src"))
+        sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
         import server  # noqa: F401
 
         print_test("Python import", "PASS")
@@ -66,7 +66,7 @@ def test_docker_container():
             )
 
         return True
-    except Exception as e:
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
         print_test(f"Docker test: {e}", "SKIP")
         return True
 
@@ -86,7 +86,7 @@ def test_mcp_protocol():
             },
         }
 
-        script_path = Path(__file__).parent / "run-mcp-docker.sh"
+        script_path = Path(__file__).parent.parent.parent / "run-mcp-docker.sh"
         if script_path.exists():
             # Test with Docker script
             process = subprocess.Popen(
@@ -100,7 +100,7 @@ def test_mcp_protocol():
             # Test directly with Python
             process = subprocess.Popen(
                 [sys.executable, "-m", "src", "--transport", "stdio"],
-                cwd=Path(__file__).parent / "mcp-server",
+                cwd=Path(__file__).parent.parent,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
@@ -128,7 +128,7 @@ def test_mcp_protocol():
         print_test("MCP protocol initialization timeout", "WARN")
         return True
 
-    except Exception as e:
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as e:
         print_test(f"MCP protocol: {e}", "SKIP")
         return True
 
@@ -149,11 +149,10 @@ async def test_async_functionality():
         if len(embedding) == 384:
             print_test(f"Async embedding generation ({duration:.2f}s)", "PASS")
             return True
-        else:
-            print_test(f"Embedding size: {len(embedding)} (expected 384)", "FAIL")
-            return False
+        print_test(f"Embedding size: {len(embedding)} (expected 384)", "FAIL")
+        return False
 
-    except Exception as e:
+    except (ImportError, RuntimeError, ValueError, TimeoutError) as e:
         print_test(f"Async functionality: {e}", "FAIL")
         return False
 
@@ -162,7 +161,7 @@ def test_ruff_compliance():
     """Test that code passes ruff checks."""
     try:
         result = subprocess.run(
-            ["ruff", "check", "mcp-server/src/", "test_server_startup.py"],
+            ["ruff", "check", str(Path(__file__).parent.parent / "src"), str(Path(__file__).parent)],
             capture_output=True,
             text=True,
             timeout=10,
@@ -171,15 +170,14 @@ def test_ruff_compliance():
         if result.returncode == 0:
             print_test("Ruff linting compliance", "PASS")
             return True
-        else:
-            errors = len(result.stdout.strip().split("\n")) if result.stdout else 0
-            print_test(f"Ruff linting ({errors} issues)", "FAIL")
-            return False
+        errors = len(result.stdout.strip().split("\n")) if result.stdout else 0
+        print_test(f"Ruff linting ({errors} issues)", "FAIL")
+        return False
 
     except FileNotFoundError:
         print_test("Ruff not installed", "SKIP")
         return True
-    except Exception as e:
+    except (subprocess.TimeoutExpired, OSError) as e:
         print_test(f"Ruff check: {e}", "SKIP")
         return True
 
@@ -221,9 +219,8 @@ def main():
         if passed == total:
             print(f"{GREEN}✅ All tests passed! ({passed}/{total}){RESET}")
             return 0
-        else:
-            print(f"{RED}❌ Some tests failed ({passed}/{total} passed){RESET}")
-            return 1
+        print(f"{RED}❌ Some tests failed ({passed}/{total} passed){RESET}")
+        return 1
 
 
 if __name__ == "__main__":

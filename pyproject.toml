@@ -1,0 +1,5 @@
+[tool.ruff]
+# Extend the mcp-server configuration
+extend = "mcp-server/pyproject.toml"
+
+# Additional root-level settings can be added here if needed

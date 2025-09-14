@@ -21,8 +21,10 @@ with tempfile.TemporaryDirectory() as tmpdir:
     os.environ["TRANSFORMERS_CACHE"] = os.path.join(tmpdir, ".cache", "huggingface")
 
 # Add the server path to sys.path relative to this file
-REPO_ROOT = Path(__file__).resolve().parent
-SERVER_PATH = REPO_ROOT / "mcp-server" / "src"
+# We're now in mcp-server/tests/, so we need to go up one level to find src/
+TESTS_DIR = Path(__file__).resolve().parent
+MCP_SERVER_DIR = TESTS_DIR.parent
+SERVER_PATH = MCP_SERVER_DIR / "src"
 sys.path.insert(0, str(SERVER_PATH))
 
 logging.basicConfig(level=logging.INFO)
@@ -126,9 +128,8 @@ async def main():
         if success:
             print("\n✅ All startup tests passed!")
             return 0
-        else:
-            print("\n❌ Startup tests failed!")
-            return 1
+        print("\n❌ Startup tests failed!")
+        return 1
     except (RuntimeError, ValueError, ImportError, KeyboardInterrupt) as e:
         print(f"\n💥 Test crashed: {e}")
         import traceback
