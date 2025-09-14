@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Union
 
+import httpx
 from dotenv import load_dotenv
 from fastembed import TextEmbedding
 from fastmcp import Context, FastMCP
@@ -727,7 +728,7 @@ async def reflect_on_past(
         # Check if main collection exists
         try:
             await qdrant_client.get_collection(MAIN_COLLECTION)
-        except (QdrantUnexpectedResponse, ConnectionError, TimeoutError):
+        except (QdrantUnexpectedResponse, ConnectionError, TimeoutError, httpx.RequestError):
             return f"Collection '{MAIN_COLLECTION}' not found."
 
         # Build search filter using helper function
@@ -751,7 +752,7 @@ async def reflect_on_past(
                 should_use_decay=should_use_decay,
             )
 
-        except (QdrantUnexpectedResponse, ConnectionError, TimeoutError, ValueError) as e:
+        except (QdrantUnexpectedResponse, ConnectionError, TimeoutError, ValueError, httpx.RequestError) as e:
             logger.error(f"Error searching {MAIN_COLLECTION}: {e!s}")
             return f"Error searching conversations: {e!s}"
 
@@ -781,7 +782,7 @@ async def reflect_on_past(
 
         return result_text
 
-    except (ValueError, TypeError, RuntimeError, ConnectionError) as e:
+    except (ValueError, TypeError, RuntimeError, ConnectionError, httpx.RequestError) as e:
         await ctx.error(f"Search failed: {e!s}")
         return f"Failed to search conversations: {e!s}"
 
@@ -805,7 +806,7 @@ async def store_reflection(
         # Ensure main collection exists
         try:
             await qdrant_client.get_collection(MAIN_COLLECTION)
-        except (QdrantUnexpectedResponse, ConnectionError, TimeoutError):
+        except (QdrantUnexpectedResponse, ConnectionError, TimeoutError, httpx.RequestError):
             # Create collection if it doesn't exist
             await qdrant_client.create_collection(
                 collection_name=MAIN_COLLECTION,
@@ -841,7 +842,7 @@ async def store_reflection(
         tags_str = ", ".join(tags) if tags else "none"
         return f"Reflection stored successfully in project '{project_name}' with tags: {tags_str}"
 
-    except (ValueError, TypeError, RuntimeError, ConnectionError) as e:
+    except (ValueError, TypeError, RuntimeError, ConnectionError, httpx.RequestError) as e:
         await ctx.error(f"Store failed: {e!s}")
         return f"Failed to store reflection: {e!s}"
 
