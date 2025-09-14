@@ -84,6 +84,10 @@ _TRANSFORMERS_CACHE_ENV = os.getenv("TRANSFORMERS_CACHE")
 CACHE_DIR = Path(_TRANSFORMERS_CACHE_ENV).expanduser() if _TRANSFORMERS_CACHE_ENV else Path.home().joinpath(".cache/huggingface").expanduser()
 MODEL_CACHE_DAYS = int(os.getenv("MODEL_CACHE_DAYS", "7"))
 
+# Timeout (in seconds) to wait for the embedding model to become ready
+# If initialization hangs (e.g., blocked I/O), prevent indefinite blocking
+MODEL_READY_TIMEOUT = float(os.getenv("MODEL_READY_TIMEOUT", "60"))
+
 # Determine project name that will be used for all searches
 # Priority: PROJECT_ID (explicit) -> MCP_CLIENT_CWD-derived (backward compatibility)
 if PROJECT_ID:
@@ -240,6 +244,7 @@ logger.info(f"DECAY_WEIGHT: {DECAY_WEIGHT}")
 logger.info(f"DECAY_SCALE_DAYS: {DECAY_SCALE_DAYS}")
 logger.info(f"TRANSFORMERS_CACHE: {CACHE_DIR}")
 logger.info(f"MODEL_CACHE_DAYS: {MODEL_CACHE_DAYS}")
+logger.info(f"MODEL_READY_TIMEOUT: {MODEL_READY_TIMEOUT} seconds")
 logger.info(f"PROJECT_ID: {PROJECT_ID if PROJECT_ID else '(not set)'}")
 logger.info(f"MCP_CLIENT_CWD: {MCP_CLIENT_CWD}")
 logger.info(f"Default project name for searches: {DEFAULT_PROJECT_NAME}")
@@ -295,7 +300,16 @@ async def generate_embedding(text: str) -> List[float]:
     # Wait for model to be ready (will return immediately if already ready)
     if not model_ready.is_set():
         logger.info("Waiting for embedding model to initialize...")
-        await model_ready.wait()
+        try:
+            # Ensure we don't block indefinitely if readiness is never signaled
+            await asyncio.wait_for(model_ready.wait(), timeout=MODEL_READY_TIMEOUT)
+        except (TimeoutError, asyncio.TimeoutError):
+            logger.error(
+                "Embedding model initialization did not complete within %s seconds",
+                MODEL_READY_TIMEOUT,
+            )
+            # Raise a clear error so callers can surface a user-facing message
+            raise RuntimeError(f"Embedding model not ready after {MODEL_READY_TIMEOUT} seconds") from None
 
     if not local_embedding_model:
         raise RuntimeError("Local embedding model failed to initialize")
