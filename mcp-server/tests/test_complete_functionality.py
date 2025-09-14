@@ -51,9 +51,30 @@ def test_docker_container():
             print_test("Docker compose status check", "SKIP")
             return True  # Skip if Docker not available
 
-        containers = [
-            json.loads(line) for line in result.stdout.strip().split("\n") if line
-        ]
+        # Parse JSON output - handle both JSON array and JSON Lines formats
+        containers = []
+        try:
+            # First try to parse as a single JSON array
+            parsed = json.loads(result.stdout.strip())
+            if isinstance(parsed, list):
+                # It's already a list of containers
+                containers = parsed
+            elif isinstance(parsed, dict):
+                # Single container as dict
+                containers = [parsed]
+        except json.JSONDecodeError:
+            # Fall back to JSON Lines format (one JSON object per line)
+            for line in result.stdout.strip().split("\n"):
+                if line:
+                    try:
+                        containers.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+
+        # Flatten if we got a list of lists
+        if containers and isinstance(containers[0], list):
+            containers = [item for sublist in containers for item in sublist]
+
         mcp_running = any("mcp" in c.get("Name", "") for c in containers)
         qdrant_running = any("qdrant" in c.get("Name", "") for c in containers)
 
@@ -71,8 +92,22 @@ def test_docker_container():
         return True
 
 
+def cleanup_process(process):
+    """Properly terminate and reap a subprocess to avoid zombies."""
+    if process and process.poll() is None:  # Process is still running
+        # Try graceful termination first
+        process.terminate()
+        try:
+            process.wait(timeout=2)  # Wait up to 2 seconds for termination
+        except subprocess.TimeoutExpired:
+            # Force kill if still running
+            process.kill()
+            process.wait()  # This should return immediately after kill
+
+
 def test_mcp_protocol():
     """Test MCP protocol through stdio."""
+    process = None
     try:
         # Test initialization
         init_request = {
@@ -87,6 +122,10 @@ def test_mcp_protocol():
         }
 
         script_path = Path(__file__).parent.parent.parent / "run-mcp-docker.sh"
+
+        # Copy environment to preserve test variables
+        env = os.environ.copy()
+
         if script_path.exists():
             # Test with Docker script
             process = subprocess.Popen(
@@ -95,6 +134,7 @@ def test_mcp_protocol():
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 text=True,
+                env=env,
             )
         else:
             # Test directly with Python
@@ -105,6 +145,7 @@ def test_mcp_protocol():
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 text=True,
+                env=env,
             )
 
         # Send initialization request
@@ -121,16 +162,19 @@ def test_mcp_protocol():
                 data = json.loads(response)
                 if "result" in data:
                     print_test("MCP protocol initialization", "PASS")
-                    process.terminate()
+                    cleanup_process(process)
                     return True
 
-        process.terminate()
         print_test("MCP protocol initialization timeout", "WARN")
+        cleanup_process(process)
         return True
 
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as e:
         print_test(f"MCP protocol: {e}", "SKIP")
         return True
+    finally:
+        # Always cleanup the process
+        cleanup_process(process)
 
 
 async def test_async_functionality():
@@ -189,9 +233,7 @@ def main():
     print("=" * 60 + "\n")
 
     # Set up test environment
-    os.environ["EMBEDDING_MODEL"] = (
-        "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-    )
+    os.environ["EMBEDDING_MODEL"] = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     os.environ["VECTOR_SIZE"] = "384"
     os.environ["QDRANT_URL"] = "http://localhost:6333"
 

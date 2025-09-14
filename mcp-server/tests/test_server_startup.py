@@ -8,17 +8,7 @@ import tempfile
 import time
 from pathlib import Path
 
-# Set up environment
-os.environ["EMBEDDING_MODEL"] = (
-    "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-)
-os.environ["VECTOR_SIZE"] = "384"
-os.environ["QDRANT_URL"] = "http://localhost:6333"
-
-# Use temporary directories instead of hardcoded paths
-with tempfile.TemporaryDirectory() as tmpdir:
-    os.environ["MCP_CLIENT_CWD"] = tmpdir
-    os.environ["TRANSFORMERS_CACHE"] = os.path.join(tmpdir, ".cache", "huggingface")
+# Environment setup deferred to main() to manage lifecycle properly
 
 # Add the server path to sys.path relative to this file
 # We're now in mcp-server/tests/, so we need to go up one level to find src/
@@ -49,9 +39,7 @@ async def test_startup_initialization():
     print("\nState after import:")
     print(f"  local_embedding_model: {server.local_embedding_model is not None}")
     print(f"  model_ready event: {server.model_ready}")
-    print(
-        f"  model_initialization_task: {server.model_initialization_task is not None}"
-    )
+    print(f"  model_initialization_task: {server.model_initialization_task is not None}")
 
     # Now create the server which should start initialization
     print("\nCreating server (this starts model initialization)...")
@@ -61,9 +49,7 @@ async def test_startup_initialization():
     print(f"Server created in: {create_end - create_start:.3f} seconds")
 
     if server.model_initialization_task is None:
-        print(
-            "❌ ERROR: model_initialization_task was not created - initialization not started!"
-        )
+        print("❌ ERROR: model_initialization_task was not created - initialization not started!")
         return False
 
     print("✅ Model initialization was started at server startup")
@@ -73,9 +59,7 @@ async def test_startup_initialization():
         # If it's done this quickly, it either failed or there was no actual work
         try:
             _ = server.model_initialization_task.result()
-            print(
-                "⚠️  WARNING: Initialization task completed immediately (possibly cached model)"
-            )
+            print("⚠️  WARNING: Initialization task completed immediately (possibly cached model)")
         except (ImportError, RuntimeError, ValueError) as e:
             print(f"❌ ERROR: Initialization task failed: {e}")
             return False
@@ -99,9 +83,7 @@ async def test_startup_initialization():
         embedding = await server.generate_embedding("test")
         call_end = time.time()
 
-        print(
-            f"✅ First embedding call succeeded in: {call_end - call_start:.3f} seconds"
-        )
+        print(f"✅ First embedding call succeeded in: {call_end - call_start:.3f} seconds")
         print(f"✅ Embedding dimensions: {len(embedding)}")
 
         # Second call should be very fast
@@ -123,19 +105,48 @@ async def test_startup_initialization():
 
 async def main():
     """Main test function."""
+    # Save original environment variables
+    original_env = {}
+    env_vars = {
+        "EMBEDDING_MODEL": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+        "VECTOR_SIZE": "384",
+        "QDRANT_URL": "http://localhost:6333",
+        "MCP_CLIENT_CWD": None,  # Will be set to tmpdir
+        "TRANSFORMERS_CACHE": None,  # Will be set to tmpdir/.cache/huggingface
+    }
+
+    # Save original values
+    for key in env_vars:
+        original_env[key] = os.environ.get(key)
+
     try:
-        success = await test_startup_initialization()
-        if success:
-            print("\n✅ All startup tests passed!")
-            return 0
-        print("\n❌ Startup tests failed!")
-        return 1
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Set up environment variables
+            os.environ["EMBEDDING_MODEL"] = env_vars["EMBEDDING_MODEL"]
+            os.environ["VECTOR_SIZE"] = env_vars["VECTOR_SIZE"]
+            os.environ["QDRANT_URL"] = env_vars["QDRANT_URL"]
+            os.environ["MCP_CLIENT_CWD"] = tmpdir
+            os.environ["TRANSFORMERS_CACHE"] = os.path.join(tmpdir, ".cache", "huggingface")
+
+            success = await test_startup_initialization()
+            if success:
+                print("\n✅ All startup tests passed!")
+                return 0
+            print("\n❌ Startup tests failed!")
+            return 1
     except (RuntimeError, ValueError, ImportError, KeyboardInterrupt) as e:
         print(f"\n💥 Test crashed: {e}")
         import traceback
 
         traceback.print_exc()
         return 1
+    finally:
+        # Restore original environment variables
+        for key, value in original_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 if __name__ == "__main__":
