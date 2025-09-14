@@ -48,5 +48,8 @@ else
   echo "[run-mcp] Starting with MCP_CLIENT_CWD='${MCP_CLIENT_CWD}'" 1>&2
 fi
 
+# Set cache directory for models
+export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HOME/.cache/huggingface}"
+
 # Run the MCP server
 exec env PYTHONUNBUFFERED=1 python -m src

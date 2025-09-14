@@ -1,34 +1,37 @@
 """Claude Reflect MCP Server with Memory Decay."""
 
+import asyncio
+import logging
 import math
 import os
-import asyncio
+import re
 import sys
 import time
-from pathlib import Path
-from typing import Optional, List, Union
-from datetime import datetime, timezone
-import logging
 import unicodedata
-import re
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import List, Optional, Union
 
-from fastmcp import FastMCP, Context
-from pydantic import BaseModel, Field
-from qdrant_client import AsyncQdrantClient
-from qdrant_client.models import PointStruct, VectorParams, Distance
-from qdrant_client import models
-from qdrant_client.models import (
-    FormulaQuery,
-    SumExpression,
-    MultExpression,
-    ExpDecayExpression,
-    DecayParamsExpression,
-    DatetimeExpression,
-    DatetimeKeyExpression,
-)
-
+import httpx
 from dotenv import load_dotenv
 from fastembed import TextEmbedding
+from fastmcp import Context, FastMCP
+from pydantic import BaseModel, Field
+from qdrant_client import AsyncQdrantClient, models
+from qdrant_client.http.exceptions import UnexpectedResponse as QdrantUnexpectedResponse
+from qdrant_client.models import (
+    DatetimeExpression,
+    DatetimeKeyExpression,
+    DecayParamsExpression,
+    Distance,
+    ExpDecayExpression,
+    FormulaQuery,
+    MultExpression,
+    PointStruct,
+    SumExpression,
+    VectorParams,
+)
 
 # Load environment variables from current directory
 load_dotenv()
@@ -59,6 +62,7 @@ logging.getLogger("asyncio").setLevel(logging.WARNING)
 logging.getLogger("mcp.server.lowlevel.server").setLevel(logging.WARNING)
 
 # Configuration
+MCP_SERVER_NAME = "claude-self-reflect"
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 ENABLE_MEMORY_DECAY = os.getenv("ENABLE_MEMORY_DECAY", "false").lower() == "true"
 DECAY_WEIGHT = float(os.getenv("DECAY_WEIGHT", "0.3"))
@@ -77,9 +81,14 @@ if not os.getenv("VECTOR_SIZE"):
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL")
 VECTOR_SIZE = int(os.getenv("VECTOR_SIZE"))
 
-# Get cache directory from environment
-CACHE_DIR = os.getenv("TRANSFORMERS_CACHE", "/home/mcpuser/.cache/huggingface")
+# Get cache directory from environment using pathlib
+_TRANSFORMERS_CACHE_ENV = os.getenv("TRANSFORMERS_CACHE")
+CACHE_DIR = Path(_TRANSFORMERS_CACHE_ENV).expanduser() if _TRANSFORMERS_CACHE_ENV else Path.home().joinpath(".cache/huggingface").expanduser()
 MODEL_CACHE_DAYS = int(os.getenv("MODEL_CACHE_DAYS", "7"))
+
+# Timeout (in seconds) to wait for the embedding model to become ready
+# If initialization hangs (e.g., blocked I/O), prevent indefinite blocking
+MODEL_READY_TIMEOUT = float(os.getenv("MODEL_READY_TIMEOUT", "60"))
 
 # Determine project name that will be used for all searches
 # Priority: PROJECT_ID (explicit) -> MCP_CLIENT_CWD-derived (backward compatibility)
@@ -96,8 +105,17 @@ else:
 MAIN_COLLECTION = "claude_logs"
 
 
-def initialize_embedding_model(model_name: str, cache_dir: str):
-    """Initialize embedding model with smart offline/online mode."""
+# Global state for async model initialization
+local_embedding_model = None
+model_ready = asyncio.Event()
+model_initialization_task = None
+# Serialize concurrent initialization attempts to avoid duplicate tasks
+model_init_lock = asyncio.Lock()
+
+
+async def initialize_embedding_model_async(model_name: str, cache_dir: str):
+    """Initialize embedding model asynchronously with smart offline/online mode."""
+    global local_embedding_model
 
     def is_model_fresh(model_name: str, cache_dir: str, max_age_days: int = 7) -> bool:
         """Check if the model is cached and fresh (not older than max_age_days)."""
@@ -147,30 +165,96 @@ def initialize_embedding_model(model_name: str, cache_dir: str):
         os.environ["HF_HUB_OFFLINE"] = "0"
 
     try:
-        # Update timestamp file after successful initialization
-        model_cache_path = Path(cache_dir) / model_name.replace("/", "_")
-        timestamp_file = model_cache_path / ".timestamp"
+        # Run model initialization in a thread to avoid blocking
+        def init_model():
+            model_cache_path = Path(cache_dir) / model_name.replace("/", "_")
+            timestamp_file = model_cache_path / ".timestamp"
 
-        # Ensure directory exists
-        model_cache_path.mkdir(parents=True, exist_ok=True)
+            # Ensure directory exists
+            model_cache_path.mkdir(parents=True, exist_ok=True)
 
-        model = TextEmbedding(model_name=model_name, cache_dir=model_cache_path)
+            # Create model first
+            model = TextEmbedding(model_name=model_name, cache_dir=model_cache_path)
 
-        # Write current timestamp
-        with open(timestamp_file, "w") as f:
-            f.write(str(time.time()))
+            # Write current timestamp only after successful model creation
+            with open(timestamp_file, "w") as f:
+                f.write(str(time.time()))
 
-        logger.info(f"Model initialized successfully: {model_name}")
-        return model
+            logger.info(f"Model initialized successfully: {model_name}")
+            return model
+
+        # Initialize model in thread pool to avoid blocking
+        local_embedding_model = await asyncio.to_thread(init_model)
+
+        # Signal that model is ready
+        model_ready.set()
+        logger.info(f"Embedding model is ready for use: {model_name}")
+
+        return local_embedding_model
 
     except ImportError:
         logger.error("FastEmbed not available. Install with: pip install fastembed")
+        model_ready.set()  # Set even on error to unblock waiting tasks
+        raise
+    except Exception as e:
+        logger.error(f"Failed to initialize embedding model: {e}")
+        model_ready.set()  # Set even on error to unblock waiting tasks
         raise
 
 
-# Initialize local embedding model with smart caching
-logger.info(f"Initializing embedding model: {EMBEDDING_MODEL} (vector size: {VECTOR_SIZE})")
-local_embedding_model = initialize_embedding_model(EMBEDDING_MODEL, CACHE_DIR)
+async def start_model_initialization():
+    """Start async model initialization in background.
+
+    Uses a module-level asyncio.Lock to serialize concurrent calls so only one
+    background task is created and shared among callers.
+    """
+    global model_initialization_task
+
+    async with model_init_lock:
+        logger.info(
+            "Starting background initialization of embedding model: %s (vector size: %s)",
+            EMBEDDING_MODEL,
+            VECTOR_SIZE,
+        )
+
+        # If a task exists, decide based on its state
+        if model_initialization_task is not None:
+            # If already started and still running, return existing task
+            if not model_initialization_task.done():
+                logger.info("Model initialization already in progress")
+                return model_initialization_task
+
+            # Task is done: check whether it succeeded, failed, or was cancelled
+            if model_initialization_task.cancelled():
+                logger.warning("Previous model initialization was cancelled; restarting")
+                if model_ready.is_set():
+                    model_ready.clear()
+            else:
+                try:
+                    exc = model_initialization_task.exception()
+                except asyncio.CancelledError:
+                    # Defensive: treat as cancelled path
+                    logger.warning("Previous model initialization raised CancelledError on exception(); restarting")
+                    if model_ready.is_set():
+                        model_ready.clear()
+                else:
+                    if exc is None:
+                        # Prior run completed successfully: return completed task, do not clear readiness
+                        logger.info("Model initialization previously completed successfully; reusing completed task")
+                        return model_initialization_task
+                    # Prior run failed: clear readiness and restart
+                    logger.warning("Previous model initialization failed; restarting")
+                    if model_ready.is_set():
+                        model_ready.clear()
+
+        # Schedule a new initialization task (first run or after failure/cancellation)
+        model_initialization_task = asyncio.create_task(initialize_embedding_model_async(EMBEDDING_MODEL, CACHE_DIR))
+
+        # Don't wait for it - let it run in background
+        logger.info("Model initialization started in background")
+
+        return model_initialization_task
+
 
 # Log effective configuration
 logger.info("Effective configuration:")
@@ -183,6 +267,7 @@ logger.info(f"DECAY_WEIGHT: {DECAY_WEIGHT}")
 logger.info(f"DECAY_SCALE_DAYS: {DECAY_SCALE_DAYS}")
 logger.info(f"TRANSFORMERS_CACHE: {CACHE_DIR}")
 logger.info(f"MODEL_CACHE_DAYS: {MODEL_CACHE_DAYS}")
+logger.info(f"MODEL_READY_TIMEOUT: {MODEL_READY_TIMEOUT} seconds")
 logger.info(f"PROJECT_ID: {PROJECT_ID if PROJECT_ID else '(not set)'}")
 logger.info(f"MCP_CLIENT_CWD: {MCP_CLIENT_CWD}")
 logger.info(f"Default project name for searches: {DEFAULT_PROJECT_NAME}")
@@ -191,7 +276,7 @@ logger.info(f"Default project name for searches: {DEFAULT_PROJECT_NAME}")
 class SearchResult(BaseModel):
     """A single search result."""
 
-    id: str
+    result_id: str
     score: float
     timestamp: str
     role: str
@@ -204,7 +289,7 @@ class SearchResult(BaseModel):
 
 # Initialize FastMCP instance
 mcp = FastMCP(
-    name="claude-self-reflect",
+    name=MCP_SERVER_NAME,
     instructions="Search past conversations and store reflections with time-based memory decay",
 )
 
@@ -230,23 +315,40 @@ def normalize_text(text: str) -> str:
 
     # Normalize whitespace - replace multiple spaces/tabs/newlines with single space
     # and strip leading/trailing whitespace
-    normalized = " ".join(normalized.split())
-
-    return normalized
+    return " ".join(normalized.split())
 
 
 async def generate_embedding(text: str) -> List[float]:
     """Generate embedding using local FastEmbed model."""
+    # Wait for model to be ready (will return immediately if already ready)
+    if not model_ready.is_set():
+        logger.info("Waiting for embedding model to initialize...")
+        try:
+            # Ensure we don't block indefinitely if readiness is never signaled
+            await asyncio.wait_for(model_ready.wait(), timeout=MODEL_READY_TIMEOUT)
+        except (TimeoutError, asyncio.TimeoutError):
+            logger.error(
+                "Embedding model initialization did not complete within %s seconds",
+                MODEL_READY_TIMEOUT,
+            )
+            # Raise a clear error so callers can surface a user-facing message
+            raise RuntimeError(f"Embedding model not ready after {MODEL_READY_TIMEOUT} seconds") from None
+
     if not local_embedding_model:
-        raise ValueError("Local embedding model not initialized")
+        raise RuntimeError("Local embedding model failed to initialize")
 
     # Normalize text before embedding
     normalized_text = normalize_text(text)
 
-    # Run in executor since fastembed is synchronous
-    loop = asyncio.get_event_loop()
-    embeddings = await loop.run_in_executor(None, lambda: list(local_embedding_model.embed([normalized_text])))
-    return embeddings[0].tolist()
+    # Run in thread since fastembed is synchronous
+    embeddings = await asyncio.to_thread(lambda: list(local_embedding_model.embed([normalized_text])))
+    vec = embeddings[0].tolist()
+
+    # Validate vector size
+    if len(vec) != VECTOR_SIZE:
+        raise ValueError(f"Embedding size mismatch: expected {VECTOR_SIZE}, got {len(vec)}")
+
+    return vec
 
 
 # Helper functions for search
@@ -264,9 +366,9 @@ def build_native_decay_query(_: list) -> FormulaQuery:
 
     decay = ExpDecayExpression(
         exp_decay=DecayParamsExpression(
-            x=DatetimeKeyExpression(datetime_key="timestamp"),  # поле с датой в payload
-            target=DatetimeExpression(datetime=current_time),  # текущее время в ISO-8601
-            # scale в секундах (POSIX seconds), а НЕ миллисекундах:
+            x=DatetimeKeyExpression(datetime_key="timestamp"),  # field with date in payload
+            target=DatetimeExpression(datetime=current_time),  # current time in ISO-8601
+            # scale in seconds (POSIX seconds), NOT milliseconds:
             scale=int(DECAY_SCALE_DAYS * 24 * 60 * 60),
         )
     )
@@ -298,7 +400,7 @@ def calculate_client_side_decay(point, min_score: float) -> Optional[float]:
     - Документ 90 дней: final = 0.7 * similarity + 0.3 * 0.37
     - Документ 180 дней: final = 0.7 * similarity + 0.3 * 0.14
     """
-    # Пропускаем документы с низким базовым score
+    # Skip documents with low base score
     if point.score < min_score:
         return None
 
@@ -321,9 +423,7 @@ def calculate_client_side_decay(point, min_score: float) -> Optional[float]:
         decay_factor = math.exp(-age_days / DECAY_SCALE_DAYS)
 
         # Взвешенная комбинация: 70% similarity + 30% freshness
-        final_score = (1 - DECAY_WEIGHT) * point.score + DECAY_WEIGHT * decay_factor
-
-        return final_score
+        return (1 - DECAY_WEIGHT) * point.score + DECAY_WEIGHT * decay_factor
 
     except (ValueError, TypeError) as e:
         logger.debug(f"Error parsing timestamp: {e}")
@@ -360,25 +460,27 @@ def convert_point_to_search_result(point, min_score: float) -> SearchResult:
         # Если нет timestamp, используем текущее время
         clean_timestamp = datetime.now(timezone.utc).isoformat()
 
-    # Получаем score - может быть в point.score (native) или в payload (client-side decay)
-    score = point.score if hasattr(point, "score") and point.score is not None else point.payload.get("score")
+    # Determine final score source:
+    # - Client-side decay stores final score in payload['score']
+    # - Native/standard search uses point.score from Qdrant
+    payload_score = point.payload.get("score")
+    score = payload_score if payload_score is not None else (point.score if getattr(point, "score", None) is not None else None)
 
     # Возвращаем только если не ниже порога
     if score is None or score < min_score:
         return None
-    else:
-        return SearchResult(
-            id=str(point.id),
-            score=score,  # Используем найденный score
-            timestamp=clean_timestamp,
-            # Используем start_role если есть, иначе role, иначе 'unknown'
-            role=point.payload.get("start_role", point.payload.get("role", "unknown")),
-            excerpt=point.payload.get("text", ""),
-            project_name=point.payload.get("project_name", point.payload.get("project", "unknown")),
-            conversation_id=point.payload.get("conversation_id"),
-            field=point.payload.get("field"),  # Тип контента: text, code, stdout, error
-            tags=point.payload.get("tags"),  # Теги для рефлексий
-        )
+    return SearchResult(
+        result_id=str(point.id),
+        score=score,  # Используем найденный score
+        timestamp=clean_timestamp,
+        # Используем start_role если есть, иначе role, иначе 'unknown'
+        role=point.payload.get("start_role", point.payload.get("role", "unknown")),
+        excerpt=point.payload.get("text", ""),
+        project_name=point.payload.get("project_name", point.payload.get("project", "unknown")),
+        conversation_id=point.payload.get("conversation_id"),
+        field=point.payload.get("field"),  # Тип контента: text, code, stdout, error
+        tags=point.payload.get("tags"),  # Теги для рефлексий
+    )
 
 
 async def perform_qdrant_search(
@@ -415,7 +517,7 @@ async def perform_qdrant_search(
             query_obj = build_native_decay_query(query_embedding)
             logger.info("Native decay query object created")
 
-            # Шаг 2: Выполняем поиск с decay на стороне Qdrant
+            # Step 2: Execute search with decay on Qdrant side
             logger.info("Executing query_points with native decay...")
             query_result = await qdrant_client.query_points(
                 collection_name=MAIN_COLLECTION,
@@ -444,7 +546,7 @@ async def perform_qdrant_search(
             query_result = await qdrant_client.query_points(
                 collection_name=MAIN_COLLECTION,
                 query=query_embedding,
-                limit=limit * 3,  # Берём с запасом для последующей фильтрации
+                limit=limit * 3,  # Take extra for subsequent filtering
                 with_payload=True,
                 query_filter=search_filter,  # Фильтр по проекту
                 with_vectors=False,
@@ -458,7 +560,7 @@ async def perform_qdrant_search(
 
         else:
             # Вариант 3: Стандартный поиск без decay
-            # Шаг 1: Обычный векторный поиск с порогом similarity
+            # Step 1: Regular vector search with similarity threshold
             logger.info(f"Using STANDARD search without decay for {MAIN_COLLECTION}")
             logger.info(f"Executing query_points with score_threshold={min_score}...")
             query_result = await qdrant_client.query_points(
@@ -485,8 +587,8 @@ async def perform_qdrant_search(
                     logger.debug(f"Added result with score {search_result.score}")
                 else:
                     logger.debug(f"Filtered out result below min_score {min_score}")
-            except Exception as e:
-                logger.error(f"Error converting point {point.id}: {str(e)}")
+            except (ValueError, TypeError, AttributeError, KeyError) as e:
+                logger.error(f"Error converting point {point.id}: {e!s}")
                 continue
 
         # Шаг 3: Сортируем по убыванию финального score
@@ -500,7 +602,7 @@ async def perform_qdrant_search(
         return all_results
 
     except Exception as e:
-        logger.error(f"Error searching {MAIN_COLLECTION}: {str(e)}")
+        logger.error(f"Error searching {MAIN_COLLECTION}: {e!s}")
         logger.error(f"Exception type: {type(e).__name__}")
         logger.error(f"Search filter was: {search_filter}")
         import traceback
@@ -633,8 +735,8 @@ async def reflect_on_past(
     if isinstance(use_decay, str):
         try:
             use_decay = int(use_decay)
-        except ValueError:
-            raise ValueError("use_decay must be '1', '0', or '-1'")
+        except ValueError as e:
+            raise ValueError("use_decay must be '1', '0', or '-1'") from e
 
     # Parse decay parameter using integer approach
     should_use_decay = (
@@ -651,7 +753,7 @@ async def reflect_on_past(
         # Check if main collection exists
         try:
             await qdrant_client.get_collection(MAIN_COLLECTION)
-        except Exception:
+        except (QdrantUnexpectedResponse, ConnectionError, TimeoutError, httpx.RequestError):
             return f"Collection '{MAIN_COLLECTION}' not found."
 
         # Build search filter using helper function
@@ -675,9 +777,9 @@ async def reflect_on_past(
                 should_use_decay=should_use_decay,
             )
 
-        except Exception as e:
-            logger.error(f"Error searching {MAIN_COLLECTION}: {str(e)}")
-            return f"Error searching conversations: {str(e)}"
+        except (QdrantUnexpectedResponse, ConnectionError, TimeoutError, ValueError, httpx.RequestError) as e:
+            logger.error(f"Error searching {MAIN_COLLECTION}: {e!s}")
+            return f"Error searching conversations: {e!s}"
 
         # Sort by score and limit
         all_results.sort(key=lambda x: x.score, reverse=True)
@@ -705,16 +807,16 @@ async def reflect_on_past(
 
         return result_text
 
-    except Exception as e:
-        await ctx.error(f"Search failed: {str(e)}")
-        return f"Failed to search conversations: {str(e)}"
+    except (ValueError, TypeError, RuntimeError, ConnectionError, httpx.RequestError) as e:
+        await ctx.error(f"Search failed: {e!s}")
+        return f"Failed to search conversations: {e!s}"
 
 
 @mcp.tool()
 async def store_reflection(
     ctx: Context,
     content: str = Field(description="The information, insight or reflection to store"),
-    tags: List[str] = Field(default=[], description="Tags to categorize this information, insight or reflection"),
+    tags: List[str] = Field(default_factory=list, description="Tags to categorize this information, insight or reflection"),
     project: Optional[str] = Field(
         default=None,
         description="Target project for the stored information, insight or reflection. If not provided, uses current project.",
@@ -729,7 +831,7 @@ async def store_reflection(
         # Ensure main collection exists
         try:
             await qdrant_client.get_collection(MAIN_COLLECTION)
-        except Exception:
+        except (QdrantUnexpectedResponse, ConnectionError, TimeoutError, httpx.RequestError):
             # Create collection if it doesn't exist
             await qdrant_client.create_collection(
                 collection_name=MAIN_COLLECTION,
@@ -740,10 +842,10 @@ async def store_reflection(
         # Generate embedding for the reflection
         embedding = await generate_embedding(content)
 
-        # Create point with metadata
-        point_id = datetime.now(timezone.utc).timestamp()
+        # Create point with unique UUID to avoid ID collisions under concurrency
+        point_id = str(uuid.uuid4())
         point = PointStruct(
-            id=int(point_id),
+            id=point_id,
             vector=embedding,
             payload={
                 "text": content,
@@ -753,7 +855,7 @@ async def store_reflection(
                 "role": "user_reflection",
                 "start_role": "user_reflection",  # For compatibility with search
                 "project_name": project_name,  # Use consistent field name
-                "conversation_id": f"reflection_{int(point_id)}",
+                "conversation_id": f"reflection_{point_id}",
                 "field": "text",
                 "source": "reflection",
             },
@@ -765,9 +867,9 @@ async def store_reflection(
         tags_str = ", ".join(tags) if tags else "none"
         return f"Reflection stored successfully in project '{project_name}' with tags: {tags_str}"
 
-    except Exception as e:
-        await ctx.error(f"Store failed: {str(e)}")
-        return f"Failed to store reflection: {str(e)}"
+    except (ValueError, TypeError, RuntimeError, ConnectionError, httpx.RequestError) as e:
+        await ctx.error(f"Store failed: {e!s}")
+        return f"Failed to store reflection: {e!s}"
 
 
 # Debug output
@@ -779,7 +881,28 @@ else:
     logger.info("Logging to console only")
 logger.info("Server starting...")
 
+
+async def create_server() -> FastMCP:
+    """Factory function to create and initialize the MCP server."""
+    # Start model initialization in background
+    await start_model_initialization()
+
+    # Return the configured MCP server
+    return mcp
+
+
+# Export both mcp and create_server for different use cases
+__all__ = ["create_server", "mcp"]
+
+
 if __name__ == "__main__":
     logger.info(f"MCP server started with args: {sys.argv}")
     logger.info(f"Current working directory: {os.getcwd()}")
     logger.info(f"Python path: {sys.path}")
+
+    # Run the server using factory function for async initialization in the same loop
+    async def _main():
+        server = await create_server()
+        await server.run_async()
+
+    asyncio.run(_main())
