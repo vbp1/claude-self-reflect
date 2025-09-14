@@ -17,6 +17,7 @@ from fastembed import TextEmbedding
 from fastmcp import Context, FastMCP
 from pydantic import BaseModel, Field
 from qdrant_client import AsyncQdrantClient, models
+from qdrant_client.http.exceptions import UnexpectedResponse as QdrantUnexpectedResponse
 from qdrant_client.models import (
     DatetimeExpression,
     DatetimeKeyExpression,
@@ -709,7 +710,7 @@ async def reflect_on_past(
         # Check if main collection exists
         try:
             await qdrant_client.get_collection(MAIN_COLLECTION)
-        except (models.UnexpectedResponse, ConnectionError, TimeoutError):
+        except (QdrantUnexpectedResponse, ConnectionError, TimeoutError):
             return f"Collection '{MAIN_COLLECTION}' not found."
 
         # Build search filter using helper function
@@ -733,7 +734,7 @@ async def reflect_on_past(
                 should_use_decay=should_use_decay,
             )
 
-        except (models.UnexpectedResponse, ConnectionError, TimeoutError, ValueError) as e:
+        except (QdrantUnexpectedResponse, ConnectionError, TimeoutError, ValueError) as e:
             logger.error(f"Error searching {MAIN_COLLECTION}: {e!s}")
             return f"Error searching conversations: {e!s}"
 
@@ -787,7 +788,7 @@ async def store_reflection(
         # Ensure main collection exists
         try:
             await qdrant_client.get_collection(MAIN_COLLECTION)
-        except (models.UnexpectedResponse, ConnectionError, TimeoutError):
+        except (QdrantUnexpectedResponse, ConnectionError, TimeoutError):
             # Create collection if it doesn't exist
             await qdrant_client.create_collection(
                 collection_name=MAIN_COLLECTION,
