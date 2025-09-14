@@ -59,6 +59,7 @@ logging.getLogger("asyncio").setLevel(logging.WARNING)
 logging.getLogger("mcp.server.lowlevel.server").setLevel(logging.WARNING)
 
 # Configuration
+MCP_SERVER_NAME = "claude-self-reflect"
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 ENABLE_MEMORY_DECAY = os.getenv("ENABLE_MEMORY_DECAY", "false").lower() == "true"
 DECAY_WEIGHT = float(os.getenv("DECAY_WEIGHT", "0.3"))
@@ -77,9 +78,13 @@ if not os.getenv("VECTOR_SIZE"):
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL")
 VECTOR_SIZE = int(os.getenv("VECTOR_SIZE"))
 
-# Get cache directory from environment
-HOME_DIR = os.getenv("HOME")
-CACHE_DIR = os.getenv("TRANSFORMERS_CACHE", HOME_DIR + "/.cache/huggingface")
+# Get cache directory from environment using pathlib
+_TRANSFORMERS_CACHE_ENV = os.getenv("TRANSFORMERS_CACHE")
+CACHE_DIR = (
+    Path(_TRANSFORMERS_CACHE_ENV).expanduser()
+    if _TRANSFORMERS_CACHE_ENV
+    else Path.home().joinpath(".cache/huggingface").expanduser()
+)
 MODEL_CACHE_DAYS = int(os.getenv("MODEL_CACHE_DAYS", "7"))
 
 # Determine project name that will be used for all searches
@@ -252,7 +257,7 @@ class SearchResult(BaseModel):
 
 # Initialize FastMCP instance
 mcp = FastMCP(
-    name="claude-self-reflect",
+    name=MCP_SERVER_NAME,
     instructions="Search past conversations and store reflections with time-based memory decay",
 )
 
