@@ -217,16 +217,37 @@ async def start_model_initialization():
             VECTOR_SIZE,
         )
 
-        # If already started, return existing task
-        if model_initialization_task and not model_initialization_task.done():
-            logger.info("Model initialization already in progress")
-            return model_initialization_task
+        # If a task exists, decide based on its state
+        if model_initialization_task is not None:
+            # If already started and still running, return existing task
+            if not model_initialization_task.done():
+                logger.info("Model initialization already in progress")
+                return model_initialization_task
 
-        # Clear readiness in case of restart
-        if model_ready.is_set():
-            model_ready.clear()
+            # Task is done: check whether it succeeded, failed, or was cancelled
+            if model_initialization_task.cancelled():
+                logger.warning("Previous model initialization was cancelled; restarting")
+                if model_ready.is_set():
+                    model_ready.clear()
+            else:
+                try:
+                    exc = model_initialization_task.exception()
+                except asyncio.CancelledError:
+                    # Defensive: treat as cancelled path
+                    logger.warning("Previous model initialization raised CancelledError on exception(); restarting")
+                    if model_ready.is_set():
+                        model_ready.clear()
+                else:
+                    if exc is None:
+                        # Prior run completed successfully: return completed task, do not clear readiness
+                        logger.info("Model initialization previously completed successfully; reusing completed task")
+                        return model_initialization_task
+                    # Prior run failed: clear readiness and restart
+                    logger.warning("Previous model initialization failed; restarting")
+                    if model_ready.is_set():
+                        model_ready.clear()
 
-        # Schedule the initialization task
+        # Schedule a new initialization task (first run or after failure/cancellation)
         model_initialization_task = asyncio.create_task(initialize_embedding_model_async(EMBEDDING_MODEL, CACHE_DIR))
 
         # Don't wait for it - let it run in background
