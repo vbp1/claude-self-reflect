@@ -110,13 +110,11 @@ jobs:
       run: |
         mkdir -p .pytest/results
         mkdir -p "$TRANSFORMERS_CACHE"
-        ls -la "$TRANSFORMERS_CACHE"
-        pytest -q \
+        pytest \
           --junitxml=.pytest/results/junit.xml \
           --log-file=.pytest/results/pytest.log \
           --log-file-level=DEBUG \
-          mcp-server/tests/test_integration_mcp_qdrant.py
-        ls -la "$TRANSFORMERS_CACHE"
+          mcp-server/tests/
 
     - name: Upload test artifacts
       if: always()
