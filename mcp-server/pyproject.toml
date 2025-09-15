@@ -37,6 +37,12 @@ dependencies = [
     "fastembed>=0.4.0,<1.0.0",
 ]
 
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0,<9",
+    "pytest-asyncio>=0.23,<2",
+]
+
 [project.scripts]
 claude-self-reflect-mcp = "src.__main__:main"
 
@@ -117,4 +123,11 @@ ignore = [
     "S603",    # subprocess calls
     "S607",    # subprocess with partial path
     "T201",    # print statements
+]
+
+[tool.pytest.ini_options]
+# Allow async tests without explicit @pytest.mark.asyncio
+asyncio_mode = "auto"
+markers = [
+    "integration: marks tests that require external services like Qdrant",
 ]
