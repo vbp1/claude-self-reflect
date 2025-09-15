@@ -15,6 +15,7 @@ Note: running these tests may download the embedding model on first run.
 """
 
 import json
+import logging
 import os
 import socket
 import subprocess
@@ -31,6 +32,8 @@ TESTS_DIR = Path(__file__).resolve().parent
 MCP_SERVER_DIR = TESTS_DIR.parent
 DEFAULT_INTEGRATION_PROJECT = "integration-project"
 
+logger = logging.getLogger(__name__)
+
 
 def _qdrant_reachable(url: str) -> bool:
     """Return True if Qdrant seems reachable on host:port from the URL string."""
@@ -43,7 +46,11 @@ def _qdrant_reachable(url: str) -> bool:
         port = int(port_s)
         with socket.create_connection((host, port), timeout=1.5):
             return True
-    except OSError:
+    except ValueError as e:
+        logger.warning("Qdrant URL parse failed for %s: %s: %s", url, type(e).__name__, str(e))
+        return False
+    except OSError as e:
+        logger.warning("Qdrant not reachable at %s: %s: %s", url, type(e).__name__, str(e))
         return False
 
 

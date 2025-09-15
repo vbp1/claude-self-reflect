@@ -29,6 +29,7 @@ Cleanup:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import socket
 import subprocess
@@ -47,6 +48,8 @@ MCP_SERVER_DIR = TESTS_DIR.parent
 # Module-level default project name for isolation; set by autouse fixture
 DEFAULT_INTEGRATION_PROJECT = "integration-project"
 
+logger = logging.getLogger(__name__)
+
 
 def _qdrant_reachable(url: str) -> bool:
     try:
@@ -57,7 +60,11 @@ def _qdrant_reachable(url: str) -> bool:
         port = int(port_s)
         with socket.create_connection((host, port), timeout=1.5):
             return True
-    except OSError:
+    except ValueError as e:
+        logger.warning("Qdrant URL parse failed for %s: %s: %s", url, type(e).__name__, str(e))
+        return False
+    except OSError as e:
+        logger.warning("Qdrant not reachable at %s: %s: %s", url, type(e).__name__, str(e))
         return False
 
 
@@ -85,7 +92,17 @@ def _rpc(proc: subprocess.Popen[str], msg: Dict[str, Any], timeout: float = 20.0
         line = proc.stdout.readline()
         if line:
             try:
-                return json.loads(line)
+                obj = json.loads(line)
+                # Only return the matching response (ignore notifications/other replies)
+                expect_id = msg.get("id")
+                if expect_id is None:
+                    # If no id expected, only consider actual responses
+                    if ("result" in obj) or ("error" in obj):
+                        return obj
+                    continue
+                if obj.get("id") == expect_id and (("result" in obj) or ("error" in obj)):
+                    return obj
+                continue
             except json.JSONDecodeError:
                 continue
     return None
