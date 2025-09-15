@@ -106,6 +106,7 @@ jobs:
         DECAY_SCALE_DAYS: 90
         MODEL_CACHE_DAYS: 7
         HF_HUB_ENABLE_HF_TRANSFER: '1'
+        LOG_FILE: ${{ github.workspace }}/.pytest/results/mcp-server.log
       run: |
         mkdir -p .pytest/results
         mkdir -p "$TRANSFORMERS_CACHE"
@@ -125,6 +126,7 @@ jobs:
         path: |
           .pytest/results/junit.xml
           .pytest/results/pytest.log
+          .pytest/results/mcp-server.log
         if-no-files-found: warn
         retention-days: 7
 
