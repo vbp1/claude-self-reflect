@@ -5,6 +5,7 @@ venv/
 *.pyc
 __pycache__/
 .pytest_cache/
+.pytest/
 .ruff_cache/
 
 # Build outputs
@@ -65,4 +66,3 @@ tmp/
 Thumbs.db
 .DS_Store
 Desktop.ini
-
