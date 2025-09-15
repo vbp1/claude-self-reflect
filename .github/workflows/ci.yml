@@ -58,9 +58,6 @@ jobs:
         ports:
           - 6333:6333
           - 6334:6334
-        options: >-
-          --health-cmd="bash -lc 'curl -fsS http://localhost:6333/readyz || exit 1'"
-          --health-interval=5s --health-timeout=3s --health-retries=20
 
     steps:
     - uses: actions/checkout@v4
