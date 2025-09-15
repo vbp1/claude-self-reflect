@@ -55,7 +55,7 @@ jobs:
     env:
       EMBEDDING_MODEL: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
       VECTOR_SIZE: 384
-      TRANSFORMERS_CACHE: "~/.cache/huggingface"
+      TRANSFORMERS_CACHE: "${{ github.workspace }}/.cache/huggingface"
     services:
       qdrant:
         image: qdrant/qdrant:latest
@@ -107,7 +107,6 @@ jobs:
         MODEL_CACHE_DAYS: 7
         HF_HUB_ENABLE_HF_TRANSFER: '1'
         LOG_FILE: ${{ github.workspace }}/.pytest/results/mcp-server.log
-        LOG_LEVEL: DEBUG
       run: |
         mkdir -p .pytest/results
         mkdir -p "$TRANSFORMERS_CACHE"
