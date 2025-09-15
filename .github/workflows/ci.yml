@@ -112,8 +112,9 @@ jobs:
         pytest -q \
           --junitxml=.pytest/results/junit.xml \
           --log-file=.pytest/results/pytest.log \
-          --log-file-level=INFO \
+          --log-file-level=DEBUG \
           mcp-server/tests/test_integration_mcp_qdrant.py
+        ls -la "$TRANSFORMERS_CACHE"
 
     - name: Upload test artifacts
       if: always()
