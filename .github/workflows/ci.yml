@@ -73,7 +73,7 @@ jobs:
         path: ~/.cache/pip
         key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml') }}
         restore-keys: |
-          ${{ runner.os }}-pip-
+          ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml') }}
 
     - name: Cache HuggingFace model cache
       uses: actions/cache@v4
@@ -81,7 +81,7 @@ jobs:
         path: ~/.cache/huggingface
         key: ${{ runner.os }}-hf-${{ hashFiles('mcp-server/src/server.py') }}
         restore-keys: |
-          ${{ runner.os }}-hf-
+          ${{ runner.os }}-hf-${{ hashFiles('mcp-server/src/server.py') }}
 
     - name: Install dependencies
       run: |
