@@ -3,3 +3,10 @@
 extend = "mcp-server/pyproject.toml"
 
 # Additional root-level settings can be added here if needed
+
+[tool.pytest.ini_options]
+# Allow async tests without explicit @pytest.mark.asyncio
+asyncio_mode = "auto"
+markers = [
+    "integration: marks tests that require external services like Qdrant",
+]
