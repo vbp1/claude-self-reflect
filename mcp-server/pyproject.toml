@@ -35,6 +35,7 @@ dependencies = [
     "pydantic>=2.9.2,<3.0.0",  # Pin to avoid CVE-2024-3772
     "pydantic-settings>=2.0.0,<3.0.0",
     "fastembed>=0.4.0,<1.0.0",
+    "hf_transfer>=0.1.5,<1.0.0",
 ]
 
 [project.optional-dependencies]
