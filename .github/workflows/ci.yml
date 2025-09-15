@@ -11,6 +11,7 @@ on:
 permissions:
   contents: write
   packages: write
+  checks: write
 
 jobs:
   pre-commit:
@@ -52,6 +53,10 @@ jobs:
   tests:
     runs-on: ubuntu-latest
     needs: [pre-commit, python-check]
+    env:
+      EMBEDDING_MODEL: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+      VECTOR_SIZE: 384
+      TRANSFORMERS_CACHE: "${{ github.workspace }}/.cache/huggingface"
     services:
       qdrant:
         image: qdrant/qdrant:latest
@@ -73,13 +78,14 @@ jobs:
         path: ~/.cache/pip
         key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml') }}
         restore-keys: |
+          ${{ runner.os }}-pip-3.11-
           ${{ runner.os }}-pip-
 
     - name: Cache HuggingFace model cache
       uses: actions/cache@v4
       with:
-        path: ~/.cache/huggingface
-        key: ${{ runner.os }}-hf-${{ hashFiles('mcp-server/src/server.py') }}
+        path: ${{ env.TRANSFORMERS_CACHE }}
+        key: ${{ runner.os }}-hf-${{ env.EMBEDDING_MODEL }}
         restore-keys: |
           ${{ runner.os }}-hf-
 
@@ -96,22 +102,20 @@ jobs:
     - name: Run tests
       env:
         QDRANT_URL: http://localhost:6333
-        EMBEDDING_MODEL: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
-        VECTOR_SIZE: 384
         ENABLE_MEMORY_DECAY: true
         DECAY_WEIGHT: 0.3
         DECAY_SCALE_DAYS: 90
         MODEL_CACHE_DAYS: 7
         HF_HUB_ENABLE_HF_TRANSFER: '1'
+        LOG_FILE: ${{ github.workspace }}/.pytest/results/mcp-server.log
       run: |
-        export TRANSFORMERS_CACHE="$HOME/.cache/huggingface"
-        mkdir -p "$TRANSFORMERS_CACHE"
         mkdir -p .pytest/results
-        pytest -q \
+        mkdir -p "$TRANSFORMERS_CACHE"
+        pytest \
           --junitxml=.pytest/results/junit.xml \
           --log-file=.pytest/results/pytest.log \
-          --log-file-level=INFO \
-          mcp-server/tests
+          --log-file-level=DEBUG \
+          mcp-server/tests/
 
     - name: Upload test artifacts
       if: always()
@@ -121,8 +125,16 @@ jobs:
         path: |
           .pytest/results/junit.xml
           .pytest/results/pytest.log
+          .pytest/results/mcp-server.log
         if-no-files-found: warn
         retention-days: 7
+
+    - name: Publish Unit Test Results
+      if: always()
+      uses: EnricoMi/publish-unit-test-result-action@v2
+      with:
+        files: .pytest/results/junit.xml
+        comment_mode: off
 
 
   create-github-release:

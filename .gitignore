@@ -5,6 +5,7 @@ venv/
 *.pyc
 __pycache__/
 .pytest_cache/
+.pytest/
 .ruff_cache/
 
 # Build outputs
@@ -26,6 +27,8 @@ build/
 *.swo
 .DS_Store
 .windsurf/
+.serena/
+.codex/
 
 # Logs
 *.log
@@ -63,4 +66,3 @@ tmp/
 Thumbs.db
 .DS_Store
 Desktop.ini
-
