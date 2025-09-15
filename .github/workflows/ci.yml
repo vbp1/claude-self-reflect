@@ -55,6 +55,7 @@ jobs:
     env:
       EMBEDDING_MODEL: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
       VECTOR_SIZE: 384
+      TRANSFORMERS_CACHE: "~/.cache/huggingface"
     services:
       qdrant:
         image: qdrant/qdrant:latest
@@ -82,7 +83,7 @@ jobs:
     - name: Cache HuggingFace model cache
       uses: actions/cache@v4
       with:
-        path: ~/.cache/huggingface
+        path: ${{ env.TRANSFORMERS_CACHE }}
         key: ${{ runner.os }}-hf-${{ env.EMBEDDING_MODEL }}
         restore-keys: |
           ${{ runner.os }}-hf-
@@ -105,7 +106,6 @@ jobs:
         DECAY_SCALE_DAYS: 90
         MODEL_CACHE_DAYS: 7
         HF_HUB_ENABLE_HF_TRANSFER: '1'
-        TRANSFORMERS_CACHE: "$(pwd)/.cache/huggingface"
       run: |
         mkdir -p .pytest/results
         mkdir -p "$TRANSFORMERS_CACHE"
