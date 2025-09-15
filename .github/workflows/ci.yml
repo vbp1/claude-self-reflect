@@ -107,6 +107,7 @@ jobs:
         MODEL_CACHE_DAYS: 7
         HF_HUB_ENABLE_HF_TRANSFER: '1'
         LOG_FILE: ${{ github.workspace }}/.pytest/results/mcp-server.log
+        LOG_LEVEL: DEBUG
       run: |
         mkdir -p .pytest/results
         mkdir -p "$TRANSFORMERS_CACHE"
