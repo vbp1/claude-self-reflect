@@ -12,7 +12,6 @@ Notes:
   the global qdrant client and the embedding generator.
 """
 
-import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -97,7 +96,9 @@ class FakeAsyncQdrantClient:
         bucket = list(self._collections.get(collection_name, []))
 
         # Apply simple filter by payload if provided
-        query_filter = kwargs.get("query_filter")
+        # Prefer 'query_filter' but accept 'with_filter' for compatibility with
+        # different qdrant-client versions
+        query_filter = kwargs.get("query_filter") or kwargs.get("with_filter")
         if query_filter and isinstance(query_filter, dict) and query_filter.get("must"):
 
             def match(point: FakePoint) -> bool:
@@ -140,10 +141,13 @@ def _env_setup(monkeypatch):
 
     monkeypatch.setenv("EMBEDDING_MODEL", "test/model")
     monkeypatch.setenv("VECTOR_SIZE", "8")
+    # server.VECTOR_SIZE is read at import-time; patch module var directly
+    monkeypatch.setattr(server, "VECTOR_SIZE", 8, raising=False)
 
     # Patch embedding generator to a deterministic vector of the requested size
     async def fake_generate_embedding(text: str) -> List[float]:
-        size = int(os.getenv("VECTOR_SIZE", "8"))
+        # Read vector size from the server module to stay consistent
+        size = int(getattr(server, "VECTOR_SIZE", 8))
         # Simple pattern based on text length for variety
         val = float((len(text) % 3) + 1) / 10.0
         return [val] * size
