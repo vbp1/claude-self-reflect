@@ -26,6 +26,8 @@ build/
 *.swo
 .DS_Store
 .windsurf/
+.serena/
+.codex/
 
 # Logs
 *.log
