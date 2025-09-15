@@ -96,8 +96,15 @@ jobs:
     - name: Run tests
       env:
         QDRANT_URL: http://localhost:6333
+        EMBEDDING_MODEL: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+        VECTOR_SIZE: 384
+        ENABLE_MEMORY_DECAY: true
+        DECAY_WEIGHT: 0.3
+        DECAY_SCALE_DAYS: 90
+        MODEL_CACHE_DAYS: 7
       run: |
         export TRANSFORMERS_CACHE="$HOME/.cache/huggingface"
+        export 
         mkdir -p "$TRANSFORMERS_CACHE"
         pytest -q mcp-server/tests
 
