@@ -102,11 +102,27 @@ jobs:
         DECAY_WEIGHT: 0.3
         DECAY_SCALE_DAYS: 90
         MODEL_CACHE_DAYS: 7
+        HF_HUB_ENABLE_HF_TRANSFER: '1'
       run: |
         export TRANSFORMERS_CACHE="$HOME/.cache/huggingface"
-        export 
         mkdir -p "$TRANSFORMERS_CACHE"
-        pytest -q mcp-server/tests
+        mkdir -p .pytest/results
+        pytest -q \
+          --junitxml=.pytest/results/junit.xml \
+          --log-file=.pytest/results/pytest.log \
+          --log-file-level=INFO \
+          mcp-server/tests
+
+    - name: Upload test artifacts
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results
+        path: |
+          .pytest/results/junit.xml
+          .pytest/results/pytest.log
+        if-no-files-found: warn
+        retention-days: 7
 
 
   create-github-release:
