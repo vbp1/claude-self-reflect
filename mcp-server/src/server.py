@@ -558,15 +558,14 @@ async def perform_qdrant_search(
 
         else:
             # Вариант 3: Стандартный поиск без decay
-            # Step 1: Regular vector search with similarity threshold
+            # Fetch extra candidates without server-side threshold, filter min_score client-side
             logger.info(f"Using STANDARD search without decay for {MAIN_COLLECTION}")
-            logger.info(f"Executing query_points with score_threshold={min_score}...")
+            logger.info("Executing query_points without score_threshold, fetching extra candidates...")
             query_result = await qdrant_client.query_points(
                 collection_name=MAIN_COLLECTION,
                 query=query_embedding,
-                limit=limit,
+                limit=limit * 3,  # fetch more to allow client-side filtering
                 with_payload=True,
-                score_threshold=min_score,  # Фильтруем по минимальному score
                 query_filter=search_filter,  # Фильтр по проекту
                 with_vectors=False,
             )
@@ -588,6 +587,18 @@ async def perform_qdrant_search(
             except (ValueError, TypeError, AttributeError, KeyError) as e:
                 logger.error(f"Error converting point {point.id}: {e!s}")
                 continue
+
+        # Soft fallback for STANDARD path: if no results met min_score, retry with a softer threshold
+        if (not should_use_decay) and (not all_results) and (min_score > 0.0):
+            soft_threshold = max(0.5, min_score * 0.8)
+            logger.info(f"No results above min_score={min_score:.2f}. Retrying with soft_threshold={soft_threshold:.2f}.")
+            for point in results:
+                try:
+                    search_result = convert_point_to_search_result(point=point, min_score=soft_threshold)
+                    if search_result is not None:
+                        all_results.append(search_result)
+                except (ValueError, TypeError, AttributeError, KeyError) as e:
+                    logger.debug(f"Soft-threshold conversion error for point {getattr(point, 'id', '?')}: {e!s}")
 
         # Шаг 3: Сортируем по убыванию финального score
         all_results.sort(key=lambda x: x.score, reverse=True)
