@@ -86,6 +86,38 @@ claude mcp add claude-self-reflect "$(claude-self-reflect-path)/mcp-server/run-m
 - Client-side decay fetches extra candidates; tune min_score and limit if needed.
 - On Ubuntu, system modules like python3-apt must be installed via apt, not pip.
 
+## Running Tests
+
+Prerequisites
+- Python 3.11+
+- Qdrant reachable at `http://localhost:6333` for integration tests
+
+Setup (once)
+- Create a virtualenv and install deps (including test extras):
+  - `cd mcp-server`
+  - `python -m venv venv && . venv/bin/activate`
+  - `pip install -e .[test]`
+
+Start Qdrant for integration tests
+- Option A: Docker (local)
+  - `docker run --rm -p 6333:6333 -p 6334:6334 qdrant/qdrant:latest`
+- Option B: docker-compose (from repo root)
+  - `docker compose up qdrant`
+- The integration tests will be skipped if Qdrant is not reachable.
+
+Run tests
+- Unit tests (no network; use fakes/mocks):
+  - `pytest -q mcp-server/tests/test_server_unit.py`
+- Integration tests (spawn MCP server via stdio):
+  - `pytest -q mcp-server/tests/test_integration_search_scenarios.py`
+- Single integration test example:
+  - `pytest -q mcp-server/tests/test_integration_search_scenarios.py::test_decay_impacts_ranking_order_native`
+
+Notes
+- Integration fixtures set required env vars for the spawned server (e.g., `EMBEDDING_MODEL`, `VECTOR_SIZE`, `TRANSFORMERS_CACHE`). You typically do not need to export them manually when running tests.
+- Override `QDRANT_URL` if needed: `QDRANT_URL=http://host:port pytest ...`
+- Tests communicate with the MCP server via STDIO per FastMCP; the server itself does not open network ports during tests.
+
 Add this to your project's CLAUDE.md or global Claude instructions:
 
 ```markdown
